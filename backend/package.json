@@ -1,0 +1,16 @@
+{
+  "name": "restaurant-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared API + real-time (SSE) server for the restaurant app. Lets the customer tab and the staff tab talk to each other.",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  }
+}

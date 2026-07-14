@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    transition: background-color 0.5s ease, color 0.5s ease;
+  }
+}
+
+/* Cozy Day Theme */
+.theme-day {
+  background-color: #FDFBF7;
+  color: #4A3E3D;
+  background-image: 
+      linear-gradient(90deg, rgba(162, 91, 52, 0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(162, 91, 52, 0.01) 8px, transparent 8px);
+  background-size: 20px 100%, 50px 100%;
+}
+
+/* Retro Night Theme */
+.theme-night {
+  background-color: #1A120B;
+  color: #E8D5C4;
+  background-image: 
+      linear-gradient(90deg, rgba(232, 213, 196, 0.01) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(232, 213, 196, 0.005) 12px, transparent 12px);
+  background-size: 30px 100%, 70px 100%;
+}
+
+/* Custom scrollbar for web app */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(0,0,0,0.05);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,0.25);
+  border-radius: 4px;
+}
+
+@keyframes slideup {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+.animate-slide-up {
+  animation: slideup 0.3s cubic-bezier(0.2, 0.9, 0.3, 1);
+}

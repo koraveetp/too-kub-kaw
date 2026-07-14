@@ -1,0 +1,966 @@
+import React, { useState } from 'react';
+import { 
+  ClipboardList, 
+  LayoutGrid, 
+  Package, 
+  RefreshCw, 
+  Plus, 
+  Minus, 
+  Trash2, 
+  QrCode, 
+  PlusCircle, 
+  AlertTriangle,
+  Check,
+  Edit,
+  X
+} from 'lucide-react';
+
+function StaffView({ 
+  theme, 
+  menu, 
+  orders, 
+  setOrders, 
+  stock, 
+  setStock, 
+  settings, 
+  activeStaffUser, 
+  showToast,
+  addons
+}) {
+  const [subTab, setSubTab] = useState('orders'); // orders, take-order, tables, stock, qrcode
+  const [orderFilter, setOrderFilter] = useState('active'); // active, new, cooking, served, paid, all
+  
+  // Direct ordering states
+  const [targetTable, setTargetTable] = useState('1');
+  const [takeOrderCart, setTakeOrderCart] = useState([]);
+  const [directCat, setDirectCat] = useState(null);
+  const [selectedItem, setSelectedItem] = useState(null);
+  const [modalQty, setModalQty] = useState(1);
+  const [modalNotes, setModalNotes] = useState('');
+  const [selectedAddons, setSelectedAddons] = useState([]);
+  const [detailMode, setDetailMode] = useState('cart'); // 'cart' (take-order) | 'editbill'
+
+  // Edit Bill states
+  const [editingBill, setEditingBill] = useState(null); // holds the order object being edited
+  const [editAddMenuId, setEditAddMenuId] = useState('');
+
+  const isDay = theme === 'day';
+  const filteredMenu = menu.filter(item => item.theme === theme);
+  const categories = [...new Set(filteredMenu.map(item => item.category))];
+
+  if (categories.length > 0 && !directCat) {
+    setDirectCat(categories[0]);
+  } else if (categories.length > 0 && !categories.includes(directCat)) {
+    setDirectCat(categories[0]);
+  }
+
+  // Filter orders for listing
+  const getFilteredOrders = () => {
+    let list = [...orders].sort((a, b) => b.createdAt - a.createdAt);
+    if (orderFilter === 'active') {
+      return list.filter(o => o.status !== 'paid' && o.status !== 'cancelled');
+    }
+    if (orderFilter !== 'all') {
+      return list.filter(o => o.status === orderFilter);
+    }
+    return list;
+  };
+
+  const payOrder = (order) => {
+    if (confirm(`ยืนยันการเช็คบิล โต๊ะ ${order.table} ยอดรวม ฿${order.total.toLocaleString()} ใช่หรือไม่?`)) {
+      setOrders(prev => prev.map(o => (o.id === order.id ? { ...o, status: 'paid' } : o)));
+      showToast(`เช็คบิล โต๊ะ ${order.table} เรียบร้อยแล้ว`);
+    }
+  };
+
+  const cancelOrder = (orderId) => {
+    if (confirm('คุณต้องการยกเลิกออเดอร์นี้ใช่หรือไม่?')) {
+      setOrders(prev => prev.map(o => {
+        if (o.id === orderId) {
+          showToast('ยกเลิกออเดอร์แล้ว');
+          return { ...o, status: 'cancelled' };
+        }
+        return o;
+      }));
+    }
+  };
+
+  const getStatusLabel = (status) => {
+    switch (status) {
+      case 'new': return 'ใหม่';
+      case 'cooking': return 'กำลังทำ';
+      case 'served': return 'เสิร์ฟแล้ว';
+      case 'paid': return 'ชำระแล้ว';
+      case 'cancelled': return 'ยกเลิก';
+      default: return status;
+    }
+  };
+
+  const getStatusColor = (status) => {
+    switch (status) {
+      case 'new': return 'bg-[#FDECC8] text-[#8a5a00]';
+      case 'cooking': return 'bg-[#DCE9F7] text-[#2F5D8A]';
+      case 'served': return 'bg-[#DFF0E3] text-[#2C6E49]';
+      case 'paid': return 'bg-[#E9E5DB] text-[#6b6656]';
+      case 'cancelled': return 'bg-[#F6DAD7] text-[#9a2c22]';
+      default: return 'bg-neutral-100 text-neutral-600';
+    }
+  };
+
+  // Direct order handlers
+  const handleOpenDetail = (item, mode = 'cart') => {
+    if (!item.available) return;
+    setDetailMode(mode);
+    setSelectedItem(item);
+    setModalQty(1);
+    setModalNotes('');
+    setSelectedAddons([]);
+  };
+
+  const handleAddonChange = (addonName, price, isChecked) => {
+    if (isChecked) {
+      setSelectedAddons(prev => [...prev, { name: addonName, price }]);
+    } else {
+      setSelectedAddons(prev => prev.filter(a => a.name !== addonName));
+    }
+  };
+
+  const handleAddToCart = () => {
+    if (!selectedItem) return;
+
+    const addonCost = selectedAddons.reduce((sum, a) => sum + a.price, 0);
+
+    // When editing an existing bill, push straight into that bill
+    if (detailMode === 'editbill' && editingBill) {
+      const items = [...editingBill.items, {
+        name: selectedItem.name,
+        qty: modalQty,
+        price: selectedItem.price,
+        addonCost: addonCost,
+        addOns: selectedAddons.map(a => a.name),
+        note: modalNotes
+      }];
+      const total = items.reduce((sum, item) => sum + (item.price + (item.addonCost || 0)) * item.qty, 0);
+      setEditingBill({ ...editingBill, items, total });
+      setSelectedItem(null);
+      showToast(`เพิ่ม ${selectedItem.name} ในบิลชั่วคราวแล้ว`);
+      return;
+    }
+
+    const cartItem = {
+      id: selectedItem.id + '_' + Date.now().toString(36),
+      menuId: selectedItem.id,
+      name: selectedItem.name,
+      basePrice: selectedItem.price,
+      price: selectedItem.price,
+      addonCost: addonCost,
+      qty: modalQty,
+      addons: selectedAddons.map(a => a.name),
+      note: modalNotes,
+      stockRef: selectedItem.stockRef || null
+    };
+
+    setTakeOrderCart(prev => [...prev, cartItem]);
+    setSelectedItem(null);
+    showToast(`เพิ่ม ${cartItem.name} ลงบิลเรียบร้อย`);
+  };
+
+  const handleRemoveDirectCartItem = (itemId) => {
+    setTakeOrderCart(prev => prev.filter(item => item.id !== itemId));
+  };
+
+  const handlePlaceDirectOrder = () => {
+    if (takeOrderCart.length === 0) return;
+
+    // Validate stock
+    let stockError = false;
+    let errorItemName = '';
+    takeOrderCart.forEach(cartItem => {
+      if (cartItem.stockRef && stock[cartItem.stockRef]) {
+        if (stock[cartItem.stockRef].count < cartItem.qty) {
+          stockError = true;
+          errorItemName = cartItem.name;
+        }
+      }
+    });
+
+    if (stockError) {
+      alert(`คลังสินค้าสำหรับเครื่องดื่ม [${errorItemName}] ไม่เพียงพอ ไม่สามารถลงบิลได้`);
+      return;
+    }
+
+    // Deduct stock
+    const updatedStock = { ...stock };
+    takeOrderCart.forEach(cartItem => {
+      if (cartItem.stockRef && updatedStock[cartItem.stockRef]) {
+        updatedStock[cartItem.stockRef].count -= cartItem.qty;
+      }
+    });
+    setStock(updatedStock);
+
+    const orderNo = '#' + String(orders.length + 1).padStart(3, '0');
+    const directTotal = takeOrderCart.reduce((sum, item) => sum + (item.basePrice + item.addonCost) * item.qty, 0);
+    const newOrder = {
+      id: 'B' + Math.floor(1000 + Math.random() * 9000),
+      no: orderNo,
+      time: new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }),
+      createdAt: Date.now(),
+      type: theme,
+      table: targetTable,
+      items: takeOrderCart.map(item => ({
+        name: item.name,
+        qty: item.qty,
+        price: item.basePrice,
+        addonCost: item.addonCost,
+        addOns: item.addons,
+        note: item.note
+      })),
+      total: directTotal,
+      status: 'new',
+      note: takeOrderCart.map(i => i.note).filter(Boolean).join(' | '),
+      by: 'พนักงาน:' + (activeStaffUser || 'Staff')
+    };
+
+    setOrders(prev => [...prev, newOrder]);
+    setTakeOrderCart([]);
+    showToast(`ลงบิล โต๊ะ ${targetTable} สำเร็จแล้ว ✓`);
+    setSubTab('orders');
+  };
+
+  // Edit Bill Modal handlers
+  const handleOpenEditBill = (table) => {
+    const activeBill = orders.find(o => String(o.table) === String(table) && o.type === theme && o.status !== 'paid' && o.status !== 'cancelled');
+    if (activeBill) {
+      setEditingBill(JSON.parse(JSON.stringify(activeBill))); // Deep copy
+      setEditAddMenuId('');
+    } else {
+      alert(`ไม่พบบิลค้างชำระสำหรับ โต๊ะ ${table}`);
+    }
+  };
+
+  const editBillTotal = (items) =>
+    items.reduce((sum, item) => sum + (item.price + (item.addonCost || 0)) * item.qty, 0);
+
+  const handleEditBillQty = (idx, val) => {
+    if (!editingBill) return;
+    const items = [...editingBill.items];
+    items[idx].qty = Math.max(1, items[idx].qty + val);
+    setEditingBill({ ...editingBill, items, total: editBillTotal(items) });
+  };
+
+  const handleRemoveEditBillItem = (idx) => {
+    if (!editingBill) return;
+    const items = editingBill.items.filter((_, i) => i !== idx);
+    setEditingBill({ ...editingBill, items, total: editBillTotal(items) });
+  };
+
+  const handleAddItemToEditBill = () => {
+    if (!editAddMenuId || !editingBill) return;
+    const item = filteredMenu.find(m => m.id === editAddMenuId);
+    if (!item) return;
+    // Open the same detail modal so staff can pick add-ons/notes/qty
+    handleOpenDetail(item, 'editbill');
+    setEditAddMenuId('');
+  };
+
+  const handleSaveEditedBill = () => {
+    if (!editingBill) return;
+    if (editingBill.items.length === 0) {
+      // If all items removed, cancel the bill
+      setOrders(prev => prev.map(o => {
+        if (o.id === editingBill.id) {
+          return { ...o, status: 'cancelled', items: [], total: 0 };
+        }
+        return o;
+      }));
+      showToast('ยกเลิกบิลสำเร็จเนื่องจากลบทุกรายการ');
+    } else {
+      setOrders(prev => prev.map(o => {
+        if (o.id === editingBill.id) {
+          return { ...o, items: editingBill.items, total: editingBill.total };
+        }
+        return o;
+      }));
+      showToast('บันทึกแก้ไขบิลเสร็จสิ้น');
+    }
+    setEditingBill(null);
+  };
+
+  const handleClearAndPay = (table) => {
+    const activeBill = orders.find(o => String(o.table) === String(table) && o.type === theme && o.status !== 'paid' && o.status !== 'cancelled');
+    if (activeBill) {
+      if (confirm(`ยืนยันการเช็คบิล โต๊ะ ${table} ยอดรวม ฿${activeBill.total.toLocaleString()} ใช่หรือไม่?`)) {
+        setOrders(prev => prev.map(o => {
+          if (o.id === activeBill.id) {
+            return { ...o, status: 'paid' };
+          }
+          return o;
+        }));
+        showToast(`เช็คบิล โต๊ะ ${table} เรียบร้อยแล้ว`);
+      }
+    }
+  };
+
+  // Restock every item of the current shift (day ingredients vs night drinks).
+  const handleRestock = (amount) => {
+    const updated = { ...stock };
+    Object.keys(updated).forEach(k => {
+      if (updated[k].theme === theme) {
+        updated[k] = { ...updated[k], count: updated[k].count + amount };
+      }
+    });
+    setStock(updated);
+    showToast(`เติมสต็อก${isDay ? 'วัตถุดิบ' : 'เครื่องดื่ม'}ทั้งหมด +${amount} เรียบร้อย`);
+  };
+
+  // Add stock to a single item.
+  const adjustStock = (key, amount) => {
+    const item = stock[key];
+    if (!item) return;
+    setStock({ ...stock, [key]: { ...item, count: item.count + amount } });
+    showToast(`${item.name} +${amount} (คงเหลือ ${item.count + amount})`);
+  };
+
+  // Helper: check table status
+  const getTableStatus = (tableNum) => {
+    const activeBill = orders.find(o => String(o.table) === String(tableNum) && o.type === theme && o.status !== 'paid' && o.status !== 'cancelled');
+    if (activeBill) {
+      return { active: true, bill: activeBill };
+    }
+    return { active: false, bill: null };
+  };
+
+  const renderActiveSubTab = () => {
+    switch (subTab) {
+      case 'orders':
+        const filteredOrders = getFilteredOrders();
+        return (
+          <div className="space-y-4">
+            <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
+              {[
+                { k: 'active', l: 'กำลังทำงาน (ค้างชำระ)' },
+                { k: 'paid', l: 'ชำระเงินแล้ว' },
+                { k: 'all', l: 'ทั้งหมด' }
+              ].map(f => (
+                <button
+                  key={f.k}
+                  onClick={() => setOrderFilter(f.k)}
+                  className={`px-3.5 py-1.5 rounded-full font-bold text-xs whitespace-nowrap transition border ${f.k === orderFilter ? 'bg-neutral-800 border-neutral-800 text-white' : 'bg-white border-neutral-200 text-neutral-500'}`}
+                >
+                  {f.l}
+                </button>
+              ))}
+            </div>
+
+            {filteredOrders.length > 0 ? (
+              <div className="grid grid-cols-1 gap-3.5">
+                {filteredOrders.map(order => (
+                  <div key={order.id} className="border border-neutral-200 bg-white rounded-2xl p-4 shadow-xs relative">
+                    <div className="flex justify-between items-center border-b pb-2 mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-extrabold bg-neutral-800 text-white text-[11px] px-2 py-0.5 rounded-md font-kanit">
+                          โต๊ะ {order.table}
+                        </span>
+                        <span className="font-mono text-neutral-400 text-xs font-semibold">{order.no}</span>
+                      </div>
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${getStatusColor(order.status)}`}>
+                        {getStatusLabel(order.status)}
+                      </span>
+                    </div>
+
+                    <div className="space-y-1.5 py-1">
+                      {order.items.map((item, idx) => (
+                        <div key={idx} className="flex justify-between items-start text-xs font-thai text-neutral-800">
+                          <div>
+                            <span className="font-bold text-amber-700 mr-1.5">{item.qty}×</span>
+                            <span>{item.name}</span>
+                            {item.addOns && item.addOns.length > 0 && (
+                              <p className="text-[9px] text-neutral-400 pl-5">พิเศษ: {item.addOns.join(', ')}</p>
+                            )}
+                            {item.note && (
+                              <p className="text-[9px] text-red-500 italic pl-5">📝 {item.note}</p>
+                            )}
+                          </div>
+                          <span className="font-mono text-neutral-500 font-medium">฿{(item.price + (item.addonCost || 0)) * item.qty}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="border-t border-neutral-100 mt-2.5 pt-2 flex justify-between items-center text-xs">
+                      <span className="text-[10px] text-neutral-400 font-medium">{order.time} น. · {order.by}</span>
+                      <b className="font-mono text-neutral-800 font-extrabold">฿{order.total.toLocaleString()}</b>
+                    </div>
+
+                    {/* Single check-bill action */}
+                    {order.status !== 'paid' && order.status !== 'cancelled' && (
+                      <div className="flex gap-2 mt-3 pt-2.5 border-t border-neutral-50">
+                        <button
+                          onClick={() => payOrder(order)}
+                          className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-bold py-2 rounded-xl text-xs transition"
+                        >
+                          ฿ เช็คบิล
+                        </button>
+                        <button
+                          onClick={() => cancelOrder(order.id)}
+                          className="px-3 border border-neutral-200 hover:bg-neutral-50 text-neutral-500 font-bold py-2 rounded-xl text-xs transition"
+                        >
+                          ยกเลิก
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-12 text-neutral-400 text-xs font-medium">ไม่มีรายการออเดอร์ในหมวดหมู่ที่เลือก</div>
+            )}
+          </div>
+        );
+
+      case 'take-order':
+        return (
+          <div className="space-y-4">
+            <div className="bg-white border rounded-2xl p-4 space-y-3 shadow-xs">
+              <div>
+                <label className="block text-xs font-bold text-neutral-400 mb-1 uppercase">เลือกโต๊ะที่ต้องการรับออเดอร์</label>
+                <select 
+                  value={targetTable}
+                  onChange={e => setTargetTable(e.target.value)}
+                  className="w-full border rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-amber-500 bg-neutral-50 font-bold text-xs"
+                >
+                  {Array.from({ length: settings.tables }, (_, i) => (
+                    <option key={i+1} value={String(i+1)}>โต๊ะ {i+1}</option>
+                  ))}
+                  <option value="กลับบ้าน">สั่งกลับบ้าน / Takeaway</option>
+                </select>
+              </div>
+
+              {/* Direct Categories Selector */}
+              <div className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-none pt-1">
+                {categories.map(c => (
+                  <button
+                    key={c}
+                    onClick={() => setDirectCat(c)}
+                    className={`px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap transition border ${c === directCat ? 'bg-neutral-800 border-neutral-800 text-white' : 'bg-neutral-100 border-neutral-200 text-neutral-500'}`}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+
+              {/* Quick Item List */}
+              <div className="divide-y divide-neutral-100 max-h-56 overflow-y-auto">
+                {filteredMenu.filter(m => m.category === directCat).map(dish => {
+                  const qty = takeOrderCart.filter(i => i.menuId === dish.id).reduce((s, i) => s + i.qty, 0);
+                  return (
+                    <div key={dish.id} className="py-2.5 flex items-center justify-between font-thai text-xs">
+                      <div>
+                        <span className="font-bold text-neutral-800 block">
+                          {dish.name}
+                          {qty > 0 && <span className="ml-1.5 text-[10px] text-amber-600 font-mono">(ในบิล {qty})</span>}
+                        </span>
+                        <span className="text-neutral-400 font-mono">฿{dish.price}</span>
+                      </div>
+
+                      <button
+                        onClick={() => handleOpenDetail(dish, 'cart')}
+                        className="bg-neutral-800 hover:bg-neutral-700 text-white font-bold px-3 py-1.5 rounded-lg transition text-[11px] disabled:opacity-40"
+                        disabled={!dish.available}
+                      >
+                        {dish.available ? '+ เลือก' : 'หมด'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Direct Cart Summary */}
+            {takeOrderCart.length > 0 && (
+              <div className="bg-white border rounded-2xl p-4 space-y-3.5 shadow-xs font-thai text-xs">
+                <div className="flex justify-between items-center font-kanit font-extrabold text-sm text-neutral-800">
+                  <span>สรุปรายการสั่งซื้อ ({targetTable})</span>
+                  <span className="font-mono text-amber-600">฿{takeOrderCart.reduce((sum, item) => sum + (item.basePrice + item.addonCost) * item.qty, 0).toLocaleString()}</span>
+                </div>
+
+                <div className="space-y-1 divide-y divide-neutral-50">
+                  {takeOrderCart.map(item => (
+                    <div key={item.id} className="flex justify-between items-start py-1.5 text-neutral-600">
+                      <div className="pr-3">
+                        <span>{item.name} (x{item.qty})</span>
+                        {item.addons.length > 0 && (
+                          <p className="text-[10px] text-neutral-400">พิเศษ: {item.addons.join(', ')}</p>
+                        )}
+                        {item.note && (
+                          <p className="text-[10px] text-red-500 italic">📝 {item.note}</p>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <span className="font-mono">฿{(item.basePrice + item.addonCost) * item.qty}</span>
+                        <button
+                          onClick={() => handleRemoveDirectCartItem(item.id)}
+                          className="text-red-500 hover:text-red-700 p-0.5 rounded hover:bg-red-50"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  onClick={handlePlaceDirectOrder}
+                  className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl transition text-center"
+                >
+                  ยืนยันออเดอร์ส่งเข้าครัว
+                </button>
+              </div>
+            )}
+          </div>
+        );
+
+      case 'tables':
+        return (
+          <div className="space-y-4">
+            <div className="flex justify-between items-center">
+              <h2 className="font-extrabold text-sm font-kanit uppercase tracking-wider text-neutral-400">ผังโต๊ะให้บริการทั้งหมด</h2>
+            </div>
+            
+            <div className="grid grid-cols-3 gap-3">
+              {Array.from({ length: settings.tables }, (_, i) => {
+                const tableNum = i + 1;
+                const status = getTableStatus(tableNum);
+                return (
+                  <div 
+                    key={tableNum}
+                    onClick={() => {
+                      if (status.active) {
+                        handleOpenEditBill(tableNum);
+                      } else {
+                        setTargetTable(String(tableNum));
+                        setSubTab('take-order');
+                      }
+                    }}
+                    className={`border rounded-2xl p-3.5 flex flex-col justify-between items-center text-center cursor-pointer transition hover:scale-[1.03] active:scale-[0.97] h-28 relative shadow-xs ${status.active ? 'bg-amber-500/10 border-amber-500 text-amber-900' : 'bg-white border-neutral-200 text-neutral-600'}`}
+                  >
+                    <span className="font-bold text-xs uppercase text-neutral-400 font-kanit">โต๊ะ {tableNum}</span>
+                    <span className="text-xl">{status.active ? '🍛' : '🍽️'}</span>
+                    
+                    {status.active ? (
+                      <div className="space-y-0.5">
+                        <span className="font-mono text-xs font-extrabold block">฿{status.bill.total.toLocaleString()}</span>
+                        <span className="text-[9px] bg-amber-500 text-white px-1.5 py-0.5 rounded-full font-bold">มีออเดอร์</span>
+                      </div>
+                    ) : (
+                      <span className="text-[9px] text-neutral-400 font-medium">ว่าง</span>
+                    )}
+
+                    {status.active && (
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleClearAndPay(tableNum);
+                        }}
+                        className="absolute -top-1.5 -right-1.5 bg-green-600 text-white rounded-full p-1 shadow-md hover:bg-green-700"
+                        title="เช็คบิล/เคลียร์โต๊ะ"
+                      >
+                        <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="bg-neutral-50 p-3 rounded-2xl text-[11px] font-thai text-neutral-500 leading-normal">
+              💡 คลิกโต๊ะที่ <b className="text-amber-700">ว่าง</b> เพื่อไปจดสั่งอาหารแทนลูกค้า หรือคลิกโต๊ะที่มี <b className="text-amber-700">ออเดอร์ค้าง</b> เพื่อเปิดเมนูแก้ไขบิล/เช็คบิลชำระเงิน
+            </div>
+          </div>
+        );
+
+      case 'stock':
+        return (
+          <div className="space-y-4">
+            <div className="flex justify-between items-center">
+              <h2 className="font-extrabold text-sm font-kanit uppercase tracking-wider text-neutral-400">{isDay ? 'คลังวัตถุดิบครัวกลางวัน' : 'คลังค็อกเทล & สปิริต บาร์'}</h2>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-neutral-400 font-bold hidden sm:block">เติมทั้งหมด:</span>
+                <button
+                  onClick={() => handleRestock(1)}
+                  className="flex items-center gap-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 border font-bold py-1.5 px-3 rounded-xl text-xs transition"
+                >
+                  <PlusCircle className="w-3.5 h-3.5" />
+                  <span>+1</span>
+                </button>
+                <button
+                  onClick={() => handleRestock(10)}
+                  className="flex items-center gap-1 bg-neutral-800 hover:bg-neutral-700 text-white font-bold py-1.5 px-3 rounded-xl text-xs transition"
+                >
+                  <PlusCircle className="w-3.5 h-3.5" />
+                  <span>+10</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="bg-white border rounded-2xl overflow-hidden shadow-xs divide-y divide-neutral-100">
+              {Object.keys(stock).filter(key => stock[key].theme === theme).map(key => {
+                const item = stock[key];
+                const isLow = item.count <= item.min;
+                return (
+                  <div key={key} className="p-3.5 flex justify-between items-center text-xs font-thai">
+                    <div className="space-y-0.5">
+                      <span className="font-bold text-neutral-800 block">{item.name}</span>
+                      <span className="text-[10px] text-neutral-400 font-mono">รหัสสินค้า: {key} &bull; สต็อกเตือนต่ำกว่า: {item.min}</span>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      {isLow && (
+                        <span className="flex items-center gap-1 text-[9px] bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-bold">
+                          <AlertTriangle className="w-3 h-3" />
+                          <span>ของใกล้หมด</span>
+                        </span>
+                      )}
+                      
+                      <div className="font-mono text-right">
+                        <span className={`text-base font-extrabold block ${isLow ? 'text-red-600' : 'text-neutral-800'}`}>
+                          {item.count}
+                        </span>
+                        <span className="text-[9px] text-neutral-400">หน่วยคงเหลือ</span>
+                      </div>
+
+                      {/* Per-item quick add */}
+                      <div className="flex flex-col gap-1">
+                        <button
+                          onClick={() => adjustStock(key, 1)}
+                          className="bg-neutral-100 hover:bg-neutral-200 text-neutral-700 border font-bold px-2 py-0.5 rounded-lg text-[10px] transition"
+                        >
+                          +1
+                        </button>
+                        <button
+                          onClick={() => adjustStock(key, 10)}
+                          className="bg-neutral-800 hover:bg-neutral-700 text-white font-bold px-2 py-0.5 rounded-lg text-[10px] transition"
+                        >
+                          +10
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+
+      case 'qrcode':
+        const urlToPrint = settings.baseUrl || window.location.origin + window.location.pathname;
+        return (
+          <div className="space-y-4">
+            <div className="border-l-4 border-amber-600 pl-2">
+              <h2 className="font-extrabold text-sm font-kanit uppercase tracking-wider text-neutral-400">พิมพ์/บันทึก QR Code ประจำโต๊ะ</h2>
+            </div>
+            
+            <div className="grid grid-cols-1 gap-4">
+              {Array.from({ length: settings.tables }, (_, i) => {
+                const table = i + 1;
+                const qrUrl = `${urlToPrint}?table=${table}`;
+                const qrImageSrc = `https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(qrUrl)}`;
+                
+                return (
+                  <div 
+                    key={table}
+                    className="bg-white border border-neutral-200 rounded-2xl p-4 text-center shadow-xs flex flex-col items-center justify-center space-y-2.5 max-w-xs mx-auto w-full"
+                  >
+                    <b className="font-kanit text-neutral-800 text-sm">โต๊ะให้บริการหมายเลข {table}</b>
+                    
+                    {/* QR Code Container */}
+                    <div className="w-44 h-44 bg-neutral-50 rounded-xl border flex items-center justify-center p-3 relative shadow-inner">
+                      <img 
+                        src={qrImageSrc} 
+                        className="w-full h-full object-contain"
+                        alt={`QR Code Table ${table}`}
+                      />
+                    </div>
+                    
+                    <p className="text-[10px] text-neutral-400 font-mono truncate w-full text-center max-w-[240px]">
+                      {qrUrl}
+                    </p>
+                    
+                    <a 
+                      href={qrImageSrc} 
+                      target="_blank" 
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1.5 text-[10px] bg-neutral-100 hover:bg-neutral-200 border text-neutral-700 font-bold px-3.5 py-1.5 rounded-xl transition"
+                    >
+                      <QrCode className="w-3.5 h-3.5" />
+                      <span>เปิดดาวน์โหลด QR รูปขนาดใหญ่</span>
+                    </a>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <div className="space-y-4 font-thai text-sm">
+      
+      {/* SECTION TITLE */}
+      <div className="flex justify-between items-center bg-[#F7F3EB]/40 dark:bg-neutral-900/20 p-2.5 rounded-2xl">
+        <div>
+          <h2 className="font-extrabold text-base font-kanit">แผงปฏิบัติงานพนักงาน</h2>
+          <span className="text-[10px] text-neutral-400 font-medium">จัดการรับออเดอร์, อัปเดตสถานะ หรือเช็คสต็อกหน้าร้าน</span>
+        </div>
+        <button 
+          onClick={() => {
+            showToast('รีเฟรชข้อมูลล่าสุดเสร็จสมบูรณ์');
+          }}
+          className="p-2 border rounded-xl hover:bg-neutral-50 text-neutral-500 bg-white shadow-xs"
+          title="อัปเดตข้อมูลหน้าร้าน"
+        >
+          <RefreshCw className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* HORIZONTAL TAB CONTROL */}
+      <div className="flex gap-1 bg-neutral-100 rounded-xl p-1 text-[11px] font-bold">
+        {[
+          { id: 'orders', label: 'บอร์ดรับออเดอร์', icon: ClipboardList },
+          { id: 'take-order', label: 'รับออเดอร์โต๊ะ', icon: PlusCircle },
+          { id: 'tables', label: 'ผัง/เช็คบิลโต๊ะ', icon: LayoutGrid },
+          { id: 'stock', label: isDay ? 'คลังวัตถุดิบ' : 'คลังเครื่องดื่ม', icon: Package },
+          { id: 'qrcode', label: 'โต๊ะ & QR', icon: QrCode }
+        ].map(tab => {
+          const Icon = tab.icon;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setSubTab(tab.id)}
+              className={`flex-1 py-2 rounded-lg flex flex-col items-center justify-center gap-1.5 transition ${tab.id === subTab ? 'bg-white text-neutral-800 shadow-xs' : 'text-neutral-500 hover:text-neutral-700'}`}
+            >
+              <Icon className="w-4 h-4" />
+              <span>{tab.label}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* PRIMARY SUB-TAB RENDER VIEW */}
+      {renderActiveSubTab()}
+
+      {/* ITEM DETAIL MODAL (add-ons + notes + qty) — same options as customer */}
+      {selectedItem && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end justify-center p-0">
+          <div className="bg-white rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
+
+            <div className="flex justify-between items-start">
+              <div>
+                <h3 className="text-base font-extrabold font-kanit">{selectedItem.name}</h3>
+                <span className="text-amber-600 font-extrabold font-mono text-base block mt-0.5">฿{selectedItem.price}</span>
+                <span className="text-[10px] text-neutral-400 font-medium">
+                  {detailMode === 'editbill' ? `เพิ่มลงบิล โต๊ะ ${editingBill?.table}` : `รับออเดอร์ โต๊ะ ${targetTable}`}
+                </span>
+              </div>
+              <button
+                onClick={() => setSelectedItem(null)}
+                className="p-1.5 rounded-full bg-neutral-100 hover:bg-neutral-200 text-neutral-500 transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {selectedItem.desc && (
+              <p className="text-xs text-neutral-400 bg-neutral-50 p-2.5 rounded-xl leading-normal font-medium font-thai">
+                {selectedItem.desc}
+              </p>
+            )}
+
+            {/* ADDONS LIST */}
+            {addons[theme]?.length > 0 && (
+              <div className="space-y-2">
+                <h4 className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400">ตัวเลือกเพิ่มเติม</h4>
+                <div className="space-y-1.5">
+                  {addons[theme].map(addon => (
+                    <label
+                      key={addon.id}
+                      className="flex items-center justify-between p-2.5 border rounded-xl cursor-pointer hover:bg-neutral-50 transition text-xs font-thai border-neutral-150"
+                    >
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={selectedAddons.some(a => a.name === addon.name)}
+                          onChange={(e) => handleAddonChange(addon.name, addon.price, e.target.checked)}
+                          className="w-4 h-4 text-amber-600 border-neutral-300 rounded focus:ring-amber-500"
+                        />
+                        <span className="font-semibold text-neutral-700">{addon.name}</span>
+                      </div>
+                      <span className="text-neutral-500 font-bold font-mono">+฿{addon.price}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* CUSTOM NOTES */}
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">หมายเหตุเพิ่มเติมถึงครัว</label>
+              <textarea
+                value={modalNotes}
+                onChange={e => setModalNotes(e.target.value)}
+                placeholder="เช่น ขอเผ็ดน้อยมาก, ไม่ใส่ผักชี, หรืออื่นๆ..."
+                className="w-full text-xs border border-neutral-200 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-amber-500 h-16 resize-none"
+              />
+            </div>
+
+            {/* QUANTITY & ACTIONS */}
+            <div className="flex items-center justify-between gap-4 pt-3 border-t border-neutral-100">
+              <div className="flex items-center gap-3.5 border border-neutral-200 rounded-xl px-3 py-1.5">
+                <button
+                  onClick={() => setModalQty(prev => Math.max(1, prev - 1))}
+                  className="p-1 text-neutral-500 hover:bg-neutral-100 rounded-lg transition"
+                >
+                  <Minus className="w-3.5 h-3.5 stroke-[2.5]" />
+                </button>
+                <span className="font-mono font-extrabold text-sm w-5 text-center">{modalQty}</span>
+                <button
+                  onClick={() => setModalQty(prev => prev + 1)}
+                  className="p-1 text-neutral-500 hover:bg-neutral-100 rounded-lg transition"
+                >
+                  <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+                </button>
+              </div>
+
+              <button
+                onClick={handleAddToCart}
+                className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl transition text-center text-xs"
+              >
+                {detailMode === 'editbill' ? 'เพิ่มลงบิล' : 'ใส่บิล'} (฿{((selectedItem.price + selectedAddons.reduce((sum, a) => sum + a.price, 0)) * modalQty).toLocaleString()})
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* EDIT BILL MODAL (For modifying active bills) */}
+      {editingBill && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-end justify-center p-0">
+          <div className="bg-white rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
+            
+            <div className="flex justify-between items-center">
+              <h3 className="text-base font-extrabold font-kanit flex items-center gap-1.5 text-neutral-800">
+                <Edit className="text-amber-600 w-4 h-4" />
+                <span>แก้ไขรายการบิล โต๊ะ {editingBill.table}</span>
+              </h3>
+              <button 
+                onClick={() => setEditingBill(null)}
+                className="p-1.5 rounded-full bg-neutral-100 hover:bg-neutral-200 text-neutral-500 transition"
+              >
+                <X className="w-4.5 h-4.5" />
+              </button>
+            </div>
+
+            {/* EDIT BILL ITEMS */}
+            <div className="divide-y divide-neutral-100 max-h-56 overflow-y-auto">
+              {editingBill.items.length > 0 ? (
+                editingBill.items.map((item, index) => (
+                  <div key={index} className="py-3 flex justify-between items-center text-xs font-thai">
+                    <div className="space-y-0.5 max-w-[50%]">
+                      <span className="font-extrabold text-neutral-800 block truncate">{item.name}</span>
+                      <span className="text-neutral-400 font-mono">฿{item.price + (item.addonCost || 0)} / ชิ้น</span>
+                      {item.addOns && item.addOns.length > 0 && (
+                        <p className="text-[9px] text-neutral-400 truncate">พิเศษ: {item.addOns.join(', ')}</p>
+                      )}
+                      {item.note && (
+                        <p className="text-[9px] text-red-500 italic truncate">📝 {item.note}</p>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-2 border rounded-lg px-2 py-0.5 bg-neutral-50">
+                        <button 
+                          onClick={() => handleEditBillQty(index, -1)}
+                          className="p-0.5 hover:bg-neutral-200 rounded text-neutral-500"
+                        >
+                          <Minus className="w-3 h-3" />
+                        </button>
+                        <span className="font-bold w-4 text-center font-mono">{item.qty}</span>
+                        <button 
+                          onClick={() => handleEditBillQty(index, 1)}
+                          className="p-0.5 hover:bg-neutral-200 rounded text-neutral-500"
+                        >
+                          <Plus className="w-3 h-3" />
+                        </button>
+                      </div>
+                      <button 
+                        onClick={() => handleRemoveEditBillItem(index)}
+                        className="text-red-500 hover:text-red-700 p-1 rounded-lg hover:bg-red-50"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p className="text-center text-xs py-6 text-neutral-400 italic">ไม่มีรายการเหลืออยู่ในบิลนี้ (หากกดบันทึก บิลจะถูกยกเลิก)</p>
+              )}
+            </div>
+
+            {/* APPEND NEW ITEM TO PENDING BILL */}
+            <div className="space-y-1.5 pt-3 border-t border-neutral-100">
+              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">เพิ่มรายการสินค้าลงในโต๊ะนี้</label>
+              <div className="flex gap-2">
+                <select 
+                  value={editAddMenuId}
+                  onChange={e => setEditAddMenuId(e.target.value)}
+                  className="flex-1 bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold"
+                >
+                  <option value="">-- เลือกเมนูอาหารที่จะสั่งเพิ่ม --</option>
+                  {filteredMenu.filter(m => m.available).map(m => (
+                    <option key={m.id} value={m.id}>{m.name} (฿{m.price})</option>
+                  ))}
+                </select>
+                <button 
+                  onClick={handleAddItemToEditBill}
+                  className="bg-neutral-800 hover:bg-neutral-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition"
+                >
+                  สั่งเพิ่ม
+                </button>
+              </div>
+            </div>
+
+            {/* SUMMARY & SUBMIT */}
+            <div className="space-y-3 pt-3 border-t border-neutral-100">
+              <div className="flex justify-between text-sm font-extrabold font-kanit">
+                <span>ราคารวมหลังแก้ไข</span>
+                <span className="text-amber-600 font-mono text-base">฿{editingBill.total.toLocaleString()}</span>
+              </div>
+              
+              <div className="flex gap-2 pt-1 font-thai text-xs">
+                <button 
+                  onClick={() => setEditingBill(null)}
+                  className="flex-1 bg-neutral-150 hover:bg-neutral-200 font-bold py-2.5 rounded-xl transition text-neutral-700"
+                >
+                  ยกเลิก
+                </button>
+                <button 
+                  onClick={handleSaveEditedBill}
+                  className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-bold py-2.5 rounded-xl transition text-center"
+                >
+                  บันทึกการแก้ไขบิล
+                </button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+export default StaffView;
