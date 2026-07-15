@@ -6,8 +6,8 @@
   "description": "Shared API + real-time (SSE) server for the restaurant app. Lets the customer tab and the staff tab talk to each other.",
   "main": "server.js",
   "scripts": {
-    "dev": "node server.js",
-    "start": "node server.js"
+    "dev": "node --env-file-if-exists=.env server.js",
+    "start": "node --env-file-if-exists=.env server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

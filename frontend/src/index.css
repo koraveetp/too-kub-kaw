@@ -11,11 +11,36 @@
 /* Cozy Day Theme */
 .theme-day {
   background-color: #FDFBF7;
-  color: #4A3E3D;
-  background-image: 
+  color: #1c1211;
+  background-image:
       linear-gradient(90deg, rgba(162, 91, 52, 0.02) 1px, transparent 1px),
       linear-gradient(90deg, rgba(162, 91, 52, 0.01) 8px, transparent 8px);
   background-size: 20px 100%, 50px 100%;
+}
+
+/* Storefront surface: warm cream fading to peach, behind the day menu. */
+.surface-cozy {
+  background-color: #FFF7F0;
+  background-image: linear-gradient(175deg, #FFFDFB 0%, #FFF4EA 45%, #FBE7D8 100%);
+}
+
+/* Horizontal wood grain for the app header, painted in CSS so it needs no
+   image asset and stays crisp at any width. */
+.wood-grain {
+  background-color: #25211e;
+  background-image:
+    linear-gradient(0deg, rgba(60, 30, 10, 0.32) 0%, transparent 22%, transparent 78%, rgba(60, 30, 10, 0.30) 100%),
+    repeating-linear-gradient(178deg,
+      rgba(255, 226, 190, 0.07) 0px,
+      rgba(255, 226, 190, 0.07) 1px,
+      transparent 1px,
+      transparent 5px),
+    repeating-linear-gradient(181deg,
+      rgba(74, 38, 14, 0.20) 0px,
+      rgba(74, 38, 14, 0.20) 2px,
+      transparent 2px,
+      transparent 11px),
+    linear-gradient(90deg, #7A4B27 0%, #9A6739 30%, #83552F 62%, #A06D3F 100%);
 }
 
 /* Retro Night Theme */

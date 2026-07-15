@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { 
+import { addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
+import {
   ClipboardList, 
   LayoutGrid, 
   Package, 
@@ -25,7 +26,8 @@ function StaffView({
   settings, 
   activeStaffUser, 
   showToast,
-  addons
+  addons,
+  choices
 }) {
   const [subTab, setSubTab] = useState('orders'); // orders, take-order, tables, stock, qrcode
   const [orderFilter, setOrderFilter] = useState('active'); // active, new, cooking, served, paid, all
@@ -38,6 +40,8 @@ function StaffView({
   const [modalQty, setModalQty] = useState(1);
   const [modalNotes, setModalNotes] = useState('');
   const [selectedAddons, setSelectedAddons] = useState([]);
+  // Pick-exactly-one groups (ขนาด / ระดับความหวาน), keyed by group name.
+  const [selectedChoices, setSelectedChoices] = useState({});
   const [detailMode, setDetailMode] = useState('cart'); // 'cart' (take-order) | 'editbill'
 
   // Edit Bill states
@@ -115,6 +119,11 @@ function StaffView({
     setModalQty(1);
     setModalNotes('');
     setSelectedAddons([]);
+    setSelectedChoices(defaultChoices(choicesFor(choices, theme, item)));
+  };
+
+  const handleChoiceChange = (groupName, option) => {
+    setSelectedChoices(prev => ({ ...prev, [groupName]: option }));
   };
 
   const handleAddonChange = (addonName, price, isChecked) => {
@@ -128,7 +137,11 @@ function StaffView({
   const handleAddToCart = () => {
     if (!selectedItem) return;
 
-    const addonCost = selectedAddons.reduce((sum, a) => sum + a.price, 0);
+    // Choices (ไซส์ L +5) ride on addonCost alongside addons, so bills and
+    // kitchen tickets need no changes to understand them.
+    const addonCost =
+      selectedAddons.reduce((sum, a) => sum + a.price, 0) + choicesCost(selectedChoices);
+    const chosenNames = Object.values(selectedChoices).map(o => o.name);
 
     // When editing an existing bill, push straight into that bill
     if (detailMode === 'editbill' && editingBill) {
@@ -137,7 +150,7 @@ function StaffView({
         qty: modalQty,
         price: selectedItem.price,
         addonCost: addonCost,
-        addOns: selectedAddons.map(a => a.name),
+        addOns: [...chosenNames, ...selectedAddons.map(a => a.name)],
         note: modalNotes
       }];
       const total = items.reduce((sum, item) => sum + (item.price + (item.addonCost || 0)) * item.qty, 0);
@@ -155,7 +168,7 @@ function StaffView({
       price: selectedItem.price,
       addonCost: addonCost,
       qty: modalQty,
-      addons: selectedAddons.map(a => a.name),
+      addons: [...chosenNames, ...selectedAddons.map(a => a.name)],
       note: modalNotes,
       stockRef: selectedItem.stockRef || null
     };
@@ -778,12 +791,43 @@ function StaffView({
               </p>
             )}
 
+            {/* PICK-ONE GROUPS — ขนาด / ระดับความหวาน, straight from the sheet */}
+            {choicesFor(choices, theme, selectedItem).map(group => (
+              <div key={group.id || group.name} className="space-y-2">
+                <h4 className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400">
+                  {group.name}
+                </h4>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {group.options.map(opt => (
+                    <label
+                      key={opt.name}
+                      className={`flex items-center justify-between p-2.5 border rounded-xl cursor-pointer transition text-xs font-thai ${selectedChoices[group.name]?.name === opt.name ? 'border-amber-500 bg-amber-50 ring-1 ring-amber-500' : 'border-neutral-150 hover:bg-neutral-50'}`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name={`staff-choice-${group.name}`}
+                          checked={selectedChoices[group.name]?.name === opt.name}
+                          onChange={() => handleChoiceChange(group.name, opt)}
+                          className="w-4 h-4 text-amber-600 border-neutral-300 focus:ring-amber-500"
+                        />
+                        <span className="font-semibold text-neutral-700">{opt.name}</span>
+                      </div>
+                      {opt.price > 0 && (
+                        <span className="text-neutral-500 font-bold font-mono">+฿{opt.price}</span>
+                      )}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ))}
+
             {/* ADDONS LIST */}
-            {addons[theme]?.length > 0 && (
+            {addonsFor(addons, theme, selectedItem).length > 0 && (
               <div className="space-y-2">
                 <h4 className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400">ตัวเลือกเพิ่มเติม</h4>
                 <div className="space-y-1.5">
-                  {addons[theme].map(addon => (
+                  {addonsFor(addons, theme, selectedItem).map(addon => (
                     <label
                       key={addon.id}
                       className="flex items-center justify-between p-2.5 border rounded-xl cursor-pointer hover:bg-neutral-50 transition text-xs font-thai border-neutral-150"
@@ -837,7 +881,7 @@ function StaffView({
                 onClick={handleAddToCart}
                 className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl transition text-center text-xs"
               >
-                {detailMode === 'editbill' ? 'เพิ่มลงบิล' : 'ใส่บิล'} (฿{((selectedItem.price + selectedAddons.reduce((sum, a) => sum + a.price, 0)) * modalQty).toLocaleString()})
+                {detailMode === 'editbill' ? 'เพิ่มลงบิล' : 'ใส่บิล'} (฿{((selectedItem.price + selectedAddons.reduce((sum, a) => sum + a.price, 0) + choicesCost(selectedChoices)) * modalQty).toLocaleString()})
               </button>
             </div>
 

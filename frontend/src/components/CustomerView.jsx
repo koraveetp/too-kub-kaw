@@ -1,5 +1,23 @@
 import React, { useState } from 'react';
-import { ShoppingBag, Trash2, X, Plus, Minus, CheckCircle, ChefHat } from 'lucide-react';
+import { ShoppingBag, ShoppingBasket, Trash2, X, Plus, Minus, CheckCircle } from 'lucide-react';
+import { isDrinkItem, addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
+import foodImg from '../assets/food.jpg';
+import beverageImg from '../assets/beverage.jpg';
+
+const GROUPS = [
+  {
+    key: 'food',
+    label: 'เมนูอาหาร',
+    image: foodImg,
+    fallback: 'from-[#A9713D] to-[#6B4021]',
+  },
+  {
+    key: 'drink',
+    label: 'เครื่องดื่ม',
+    image: beverageImg,
+    fallback: 'from-[#C99A5B] to-[#8A5A32]',
+  },
+];
 
 function CustomerView({
   theme,
@@ -12,15 +30,18 @@ function CustomerView({
   cart,
   setCart,
   addons,
+  choices,
   showToast
 }) {
-  const [activeCategory, setActiveCategory] = useState(null);
+  const [activeGroup, setActiveGroup] = useState('food');
   const [showStatusList, setShowStatusList] = useState(false);
   const [selectedItem, setSelectedItem] = useState(null);
   const [selectedOption, setSelectedOption] = useState(null); // chosen protein
   const [modalQty, setModalQty] = useState(1);
   const [modalNotes, setModalNotes] = useState('');
   const [selectedAddons, setSelectedAddons] = useState([]);
+  // Pick-exactly-one groups, keyed by group name: { 'ขนาด': {name, price}, ... }
+  const [selectedChoices, setSelectedChoices] = useState({});
   const [showCartModal, setShowCartModal] = useState(false);
   const [showSuccessNotice, setShowSuccessNotice] = useState(false);
 
@@ -28,16 +49,25 @@ function CustomerView({
 
   // Filter menu items for current theme
   const filteredMenu = menu.filter(item => item.theme === theme);
-  const categories = [...new Set(filteredMenu.map(item => item.category))];
 
-  // Set first category as default if not set
-  if (categories.length > 0 && !activeCategory) {
-    setActiveCategory(categories[0]);
-  } else if (categories.length > 0 && !categories.includes(activeCategory)) {
-    setActiveCategory(categories[0]);
-  }
+  const itemsToShow = filteredMenu.filter(item =>
+    activeGroup === 'drink' ? isDrinkItem(item) : !isDrinkItem(item)
+  );
 
-  const itemsToShow = filteredMenu.filter(item => item.category === activeCategory);
+  // Group the visible dishes under their category heading, preserving the order
+  // the categories first appear in the menu data.
+  const sections = itemsToShow.reduce((acc, item) => {
+    const section = acc.find(s => s.category === item.category);
+    if (section) section.items.push(item);
+    else acc.push({ category: item.category, items: [item] });
+    return acc;
+  }, []);
+
+  // The line under a dish name: its protein/size choices, e.g. "หมู/ไก่/ทะเล".
+  const subtitleOf = (dish) =>
+    dish.options && dish.options.length
+      ? dish.options.map(o => o.name).join('/')
+      : dish.desc;
 
   // Cart operations
   const cartCount = cart.reduce((sum, item) => sum + item.qty, 0);
@@ -51,6 +81,12 @@ function CustomerView({
     setModalQty(1);
     setModalNotes('');
     setSelectedAddons([]);
+    // Every pick-one group starts on the sheet's first option (ไซส์ M, 100%).
+    setSelectedChoices(defaultChoices(choicesFor(choices, theme, item)));
+  };
+
+  const handleChoiceChange = (groupName, option) => {
+    setSelectedChoices(prev => ({ ...prev, [groupName]: option }));
   };
 
   // Price of the dish once the protein choice is applied.
@@ -68,7 +104,10 @@ function CustomerView({
   const handleAddToCart = () => {
     if (!selectedItem) return;
 
-    const addonCost = selectedAddons.reduce((sum, a) => sum + a.price, 0);
+    // Choices (ไซส์ L +5) and addons (ไข่มุก +5) both ride on addonCost, so the
+    // cart, the bill and the kitchen ticket need no changes to understand them.
+    const addonCost =
+      selectedAddons.reduce((sum, a) => sum + a.price, 0) + choicesCost(selectedChoices);
     const basePrice = basePriceOf(selectedItem, selectedOption);
     // Fold the chosen protein into the item name, e.g. "ทอดน้ำปลาราดข้าว (หมู)".
     const itemName = selectedOption
@@ -83,7 +122,10 @@ function CustomerView({
       price: basePrice,
       addonCost: addonCost,
       qty: modalQty,
-      addons: selectedAddons.map(a => a.name),
+      addons: [
+        ...Object.values(selectedChoices).map(o => o.name),
+        ...selectedAddons.map(a => a.name),
+      ],
       note: modalNotes,
       stockRef: selectedItem.stockRef || null
     };
@@ -277,89 +319,84 @@ function CustomerView({
         /* CUSTOMER MENU VIEW */
         <div className="space-y-4">
 
-          {/* WELCOME BANNER */}
-          <div className={`p-4 rounded-2xl border transition-all duration-300 shadow-sm flex items-center gap-4 ${isDay ? 'bg-gradient-to-r from-orange-100/50 to-amber-50/50 border-orange-200/40' : 'bg-[#251A10] border-orange-950/70'}`}>
-            <div className={`w-14 h-14 rounded-2xl flex items-center justify-center flex-shrink-0 ${isDay ? 'bg-white border border-orange-200 text-amber-800' : 'bg-[#140E09] border border-orange-900/60 text-[#D4A373]'}`}>
-              {isDay ? (
-                <ChefHat className="w-8 h-8 text-orange-800" />
-              ) : (
-                <span className="text-2xl">🍸</span>
-              )}
-            </div>
-            <div className="flex-1">
-              <h3 className={`font-extrabold text-sm ${isDay ? 'text-amber-900' : 'text-[#E8D5C4]'}`}>
-                {isDay ? 'ยินดีต้อนรับสู่ ตู้กับข้าวบ้านยาย' : 'Siam Blend Bar'}
-              </h3>
-              <p className="text-[10px] text-neutral-400 leading-normal mt-0.5">
-                {isDay ? 'สัมผัสรสชาติแห่งความอบอุ่น ปรุงสดใหม่ร้อนๆ จากกระทะ ส่งตรงจากสวนสมุนไพรหลังบ้านยาย' : 'ค็อกเทลรสเลิศ เบียร์คราฟต์นุ่มคอ และดนตรีแนววินเทจแจ๊สคลาสสิกเรโทร'}
-              </p>
-              <span className={`inline-block mt-1 text-[9px] font-extrabold px-2 py-0.5 rounded-full ${isDay ? 'bg-amber-800 text-white' : 'bg-[#C2593F] text-white'}`}>
-                สั่งอาหารผ่านระบบ โต๊ะ {tableNo}
-              </span>
-            </div>
-          </div>
-
-          {/* CAT TABS */}
-          <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none sticky top-0 z-10 py-1.5 -mx-4 px-4 bg-transparent">
-            {categories.map(cat => (
+          {/* STOREFRONT CATEGORY CARDS */}
+          <div className="grid grid-cols-2 gap-3">
+            {GROUPS.map(group => (
               <button
-                key={cat}
-                onClick={() => setActiveCategory(cat)}
-                className={`whitespace-nowrap px-4 py-1.5 rounded-full font-bold text-xs transition border ${cat === activeCategory ? (isDay ? 'bg-neutral-800 border-neutral-800 text-white' : 'bg-[#C2593F] border-[#C2593F] text-white') : (isDay ? 'bg-white border-neutral-200 text-neutral-500 hover:border-neutral-300' : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:border-neutral-700')}`}
+                key={group.key}
+                onClick={() => setActiveGroup(group.key)}
+                className={`relative h-32 rounded-2xl overflow-hidden shadow-md bg-gradient-to-br flex items-center justify-center transition duration-300 active:scale-[0.98] ${group.fallback} ${
+                  activeGroup === group.key
+                    ? 'ring-4 ring-[#6B4021]/70'
+                    : 'opacity-90 hover:opacity-100'
+                }`}
               >
-                {cat}
+                <img
+                  src={group.image}
+                  alt=""
+                  loading="lazy"
+                  className="absolute inset-0 w-full h-full object-cover"
+                  onError={e => { e.currentTarget.style.display = 'none'; }}
+                />
+                <span className="absolute inset-0 bg-gradient-to-t from-black/50 via-black/15 to-black/25" />
+                <span className="relative font-kanit text-2xl font-bold text-white [text-shadow:0_2px_6px_rgba(0,0,0,0.65)]">
+                  {group.label}
+                </span>
               </button>
             ))}
           </div>
 
-          {/* CATEGORY TITLE */}
-          <div className="border-l-4 border-amber-600 pl-2">
-            <h2 className="font-extrabold text-sm font-kanit uppercase tracking-wider text-neutral-400">
-              หมวดหมู่: {activeCategory}
-            </h2>
-          </div>
+          {/* MENU SECTIONS */}
+          {sections.length > 0 ? (
+            sections.map(section => (
+              <div key={section.category} className="space-y-3">
+                <h2 className={`font-kanit text-xl font-semibold ${isDay ? 'text-[#6B4A32]' : 'text-[#E8D5C4]'}`}>
+                  {section.category}
+                </h2>
 
-          {/* DISH CARDS LIST */}
-          <div className="space-y-3">
-            {itemsToShow.length > 0 ? (
-              itemsToShow.map(dish => (
-                <div
-                  key={dish.id}
-                  onClick={() => handleOpenDetail(dish)}
-                  className={`rounded-2xl p-3 flex gap-3 cursor-pointer transition border hover:scale-[1.01] active:scale-[0.99] duration-300 ${!dish.available ? 'opacity-55' : ''} ${isDay ? 'bg-white border-orange-100/50 hover:bg-[#FDFBF7]' : 'bg-[#251A10] border-orange-950/40 hover:bg-[#2e2115]'}`}
-                >
-                  <div className={`w-18 h-18 rounded-xl overflow-hidden flex-shrink-0 flex flex-col items-center justify-center border text-2xl relative ${isDay ? 'bg-orange-50/50 border-orange-100/40 text-amber-800' : 'bg-[#140E09] border-orange-950 text-[#D4A373]'}`}>
-                    <span>{dish.emoji || '🍽️'}</span>
-                  </div>
-
-                  <div className="flex-1 flex flex-col justify-between py-0.5">
-                    <div className="space-y-0.5">
-                      <h4 className={`font-extrabold text-xs leading-snug line-clamp-1 ${isDay ? 'text-neutral-800' : 'text-stone-100'}`}>{dish.name}</h4>
-                      {dish.desc && <p className="text-[10px] text-neutral-400 line-clamp-1 font-medium">{dish.desc}</p>}
+                {section.items.map(dish => (
+                  <div
+                    key={dish.id}
+                    onClick={() => handleOpenDetail(dish)}
+                    className={`rounded-3xl p-3.5 flex items-center gap-3.5 transition duration-300 ${dish.available ? 'cursor-pointer active:scale-[0.99]' : 'opacity-55'} ${isDay ? 'bg-white shadow-[0_6px_20px_-8px_rgba(90,46,20,0.28)] hover:shadow-[0_10px_26px_-8px_rgba(90,46,20,0.35)]' : 'bg-[#251A10] border border-orange-950/40 hover:bg-[#2e2115]'}`}
+                  >
+                    <div className={`w-[88px] h-[88px] rounded-2xl flex-shrink-0 flex items-center justify-center text-4xl overflow-hidden ${isDay ? 'bg-gradient-to-b from-[#DCEBF7] to-[#CDE3B8]' : 'bg-[#140E09] border border-orange-950'}`}>
+                      {dish.image
+                        ? <img src={dish.image} alt="" loading="lazy" className="w-full h-full object-cover" />
+                        : <span>{dish.emoji || '🍽️'}</span>}
                     </div>
 
-                    <div className="flex justify-between items-end">
-                      <span className="text-xs font-mono font-extrabold text-amber-700 dark:text-[#D4A373]">
-                        {dish.options && dish.options.length > 0 && <span className="text-[9px] font-thai font-semibold text-neutral-400 mr-1">เริ่ม</span>}
-                        ฿{dish.price}
-                      </span>
-                      <div>
-                        {dish.available ? (
-                          <span className={`p-1.5 rounded-full text-white flex items-center justify-center shadow-sm ${isDay ? 'bg-[#A25B34] hover:bg-[#854523]' : 'bg-[#C2593F] hover:bg-[#a1452e]'}`}>
-                            <Plus className="w-3 h-3 stroke-[3]" />
+                    <div className="flex-1 min-w-0">
+                      <h4 className={`font-kanit font-bold text-[17px] leading-snug truncate ${isDay ? 'text-[#5A2E14]' : 'text-stone-100'}`}>
+                        {dish.name}
+                      </h4>
+                      {subtitleOf(dish) && (
+                        <p className="text-sm text-neutral-500 truncate mt-0.5">{subtitleOf(dish)}</p>
+                      )}
+                      <div className="mt-2 flex items-center gap-2">
+                        <span className={`font-kanit font-bold text-lg ${isDay ? 'text-[#7B2D12]' : 'text-[#D4A373]'}`}>
+                          {dish.price}.-
+                        </span>
+                        {!dish.available && (
+                          <span className="text-[10px] text-red-600 bg-red-100 px-2 py-0.5 rounded-full font-semibold">
+                            หมดชั่วคราว
                           </span>
-                        ) : (
-                          <span className="text-[9px] text-red-500 bg-red-100 px-2 py-0.5 rounded-full font-bold">หมดชั่วคราว</span>
                         )}
                       </div>
                     </div>
+
+                    {dish.available && (
+                      <span className={`w-14 h-14 rounded-full flex-shrink-0 flex items-center justify-center text-white shadow-md transition ${isDay ? 'bg-[#A9713D] hover:bg-[#8A5A32]' : 'bg-[#C2593F] hover:bg-[#a1452e]'}`}>
+                        <ShoppingBasket className="w-6 h-6" />
+                      </span>
+                    )}
                   </div>
-                </div>
-              ))
-            ) : (
-              <div className="text-center py-10 text-neutral-400 text-xs font-medium">ยังไม่มีรายการเมนูในหมวดนี้</div>
-            )}
-          </div>
+                ))}
+              </div>
+            ))
+          ) : (
+            <div className="text-center py-10 text-neutral-400 text-xs font-medium">ยังไม่มีรายการเมนูในหมวดนี้</div>
+          )}
 
           {/* VIEW STATUS SHORTCUT BUTTON */}
           <div className="text-center pt-4">
@@ -425,10 +462,12 @@ function CustomerView({
               </p>
             )}
 
-            {/* PROTEIN CHOICE (required) */}
+            {/* OPTION CHOICE (required) — protein for food, size (M/L) for drinks */}
             {selectedItem.options && selectedItem.options.length > 0 && (
               <div className="space-y-2">
-                <h4 className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400">เลือกเนื้อสัตว์</h4>
+                <h4 className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400">
+                  {selectedItem.options.every(o => ['M', 'L', 'S'].includes(o.name)) ? 'เลือกขนาด' : 'เลือกเนื้อสัตว์'}
+                </h4>
                 <div className="grid grid-cols-2 gap-1.5">
                   {selectedItem.options.map(opt => (
                     <label
@@ -438,7 +477,7 @@ function CustomerView({
                       <div className="flex items-center gap-2">
                         <input
                           type="radio"
-                          name="protein"
+                          name="option-choice"
                           checked={selectedOption?.name === opt.name}
                           onChange={() => setSelectedOption(opt)}
                           className="w-4 h-4 text-amber-600 border-neutral-300 focus:ring-amber-500"
@@ -452,11 +491,43 @@ function CustomerView({
               </div>
             )}
 
+            {/* PICK-ONE GROUPS — ขนาด / ระดับความหวาน, straight from the sheet */}
+            {choicesFor(choices, theme, selectedItem).map(group => (
+              <div key={group.id || group.name} className="space-y-2">
+                <h4 className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400">
+                  {group.name}
+                </h4>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {group.options.map(opt => (
+                    <label
+                      key={opt.name}
+                      className={`flex items-center justify-between p-2.5 border rounded-xl cursor-pointer transition text-xs font-thai ${selectedChoices[group.name]?.name === opt.name ? 'border-amber-500 bg-amber-50 ring-1 ring-amber-500' : 'border-neutral-150 hover:bg-neutral-50'}`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name={`choice-${group.name}`}
+                          checked={selectedChoices[group.name]?.name === opt.name}
+                          onChange={() => handleChoiceChange(group.name, opt)}
+                          className="w-4 h-4 text-amber-600 border-neutral-300 focus:ring-amber-500"
+                        />
+                        <span className="font-semibold text-neutral-700">{opt.name}</span>
+                      </div>
+                      {opt.price > 0 && (
+                        <span className="text-neutral-500 font-bold font-mono">+฿{opt.price}</span>
+                      )}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ))}
+
             {/* ADDONS LIST */}
+            {addonsFor(addons, theme, selectedItem).length > 0 && (
             <div className="space-y-2">
               <h4 className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400">ตัวเลือกเพิ่มเติม</h4>
               <div className="space-y-1.5">
-                {addons[theme]?.map(addon => (
+                {addonsFor(addons, theme, selectedItem).map(addon => (
                   <label
                     key={addon.id}
                     className="flex items-center justify-between p-2.5 border rounded-xl cursor-pointer hover:bg-neutral-50 transition text-xs font-thai border-neutral-150"
@@ -475,6 +546,7 @@ function CustomerView({
                 ))}
               </div>
             </div>
+            )}
 
             {/* CUSTOM NOTES */}
             <div className="space-y-1.5">
@@ -509,7 +581,7 @@ function CustomerView({
                 onClick={handleAddToCart}
                 className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl transition text-center text-xs"
               >
-                ใส่ตะกร้าสินค้า (฿{((basePriceOf(selectedItem, selectedOption) + selectedAddons.reduce((sum, a) => sum + a.price, 0)) * modalQty).toLocaleString()})
+                ใส่ตะกร้าสินค้า (฿{((basePriceOf(selectedItem, selectedOption) + selectedAddons.reduce((sum, a) => sum + a.price, 0) + choicesCost(selectedChoices)) * modalQty).toLocaleString()})
               </button>
             </div>
 

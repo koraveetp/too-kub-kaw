@@ -57,19 +57,91 @@ function broadcast() {
   for (const res of clients) res.write(payload);
 }
 
-// --- Live menu sync from the published Google Sheet ------------------------
-// Pull the latest menu from the sheet and adopt it as the source of truth,
-// while preserving any per-item "available" toggles the owner set locally.
+// --- Live menu sync from the Google Sheet (via Apps Script) ----------------
+// Pull the latest menu and adopt it as the source of truth for the DAY menu,
+// which the sheet owns in full (food, drinks and desserts alike). Anything the
+// sheet does not carry — the hand-curated night menu — is kept as-is.
+//
+// Scoping by theme rather than by category matters: the sheet's categories can
+// be renamed by the owner at any time, and a category-based rule would strand
+// items under the old name as undeletable duplicates.
+//
+// Per-item "available" toggles set by the owner in the app survive a sync,
+// keyed by the item's stable id.
 async function syncMenuFromSheet() {
-  const sheetMenu = await fetchMenuFromSheet();
+  const { menu: sheetMenu, addons: sheetAddons, choices: sheetChoices } = await fetchMenuFromSheet();
   const prevAvailById = new Map((state.menu || []).map((m) => [m.id, m.available]));
-  state.menu = sheetMenu.map((item) =>
-    prevAvailById.has(item.id)
-      ? { ...item, available: prevAvailById.get(item.id) }
-      : item
-  );
-  persist();
-  return state.menu.length;
+  const manualItems = (state.menu || []).filter((m) => m.theme !== 'day');
+  const nextMenu = [
+    ...sheetMenu.map((item) =>
+      prevAvailById.has(item.id)
+        ? { ...item, available: prevAvailById.get(item.id) }
+        : item
+    ),
+    ...manualItems,
+  ];
+  // The sheet owns the day-time extras; the night bar's are curated in the app.
+  const nextAddons = { ...(state.addons || {}), ...sheetAddons };
+  const nextChoices = { ...(state.choices || {}), ...sheetChoices };
+
+  // Only touch state when something actually differs, so the poll below stays
+  // silent (no disk write, no SSE push) while the sheet is untouched.
+  const changed =
+    JSON.stringify(state.menu) !== JSON.stringify(nextMenu) ||
+    JSON.stringify(state.addons) !== JSON.stringify(nextAddons) ||
+    JSON.stringify(state.choices) !== JSON.stringify(nextChoices);
+  if (changed) {
+    state.menu = nextMenu;
+    state.addons = nextAddons;
+    state.choices = nextChoices;
+    persist();
+  }
+  return { count: nextMenu.length, changed };
+}
+
+// Re-pull the sheet on a timer so an edit in Google Sheets reaches every open
+// tab on its own.
+//
+// A word on the interval: one round-trip to Apps Script measures ~4.6s, so at
+// MENU_SYNC_INTERVAL_SECONDS=5 the backend is calling Google essentially
+// non-stop. Each request also burns ~4.6s of Apps Script *runtime* quota
+// (90 min/day on a consumer account, 6 h/day on Workspace), which a 5s poll
+// exhausts in roughly 1-2 hours — after which the sheet stops loading for the
+// rest of the day. Fine for a demo or while editing the sheet; raise it to 60+
+// for anything long-running.
+const SYNC_INTERVAL_SEC = Number(process.env.MENU_SYNC_INTERVAL_SECONDS || 60);
+
+function startMenuPolling() {
+  if (!(SYNC_INTERVAL_SEC > 0)) {
+    console.log('[backend] Menu auto-sync disabled (MENU_SYNC_INTERVAL_SECONDS=0)');
+    return;
+  }
+  let running = false; // never let a slow sheet overlap itself
+  setInterval(async () => {
+    if (running) return;
+    running = true;
+    try {
+      const { count, changed } = await syncMenuFromSheet();
+      if (changed) {
+        broadcast();
+        console.log(`[backend] Sheet changed — menu updated (${count} items)`);
+      }
+    } catch (err) {
+      // A transient failure is not fatal: the last-known menu stays live and
+      // the next tick will try again.
+      console.warn(`[backend] Menu auto-sync failed, keeping current menu. (${err.message})`);
+    } finally {
+      running = false;
+    }
+  }, SYNC_INTERVAL_SEC * 1000);
+  console.log(`[backend] Menu auto-sync every ${SYNC_INTERVAL_SEC}s`);
+  if (SYNC_INTERVAL_SEC < 30) {
+    console.warn(
+      `[backend] Note: a ${SYNC_INTERVAL_SEC}s interval calls Apps Script ~${Math.round(3600 / SYNC_INTERVAL_SEC)}x/hour ` +
+      `(~4.6s each). Expect to hit Google's daily script-runtime quota in a few hours; ` +
+      `set MENU_SYNC_INTERVAL_SECONDS=60 for long runs.`
+    );
+  }
 }
 
 // --- App --------------------------------------------------------------------
@@ -117,10 +189,10 @@ app.put('/api/:resource', (req, res) => {
 // the sheet). Broadcasts the refreshed menu to every open tab.
 app.post('/api/menu/refresh', async (_req, res) => {
   try {
-    const count = await syncMenuFromSheet();
-    broadcast();
-    console.log(`[backend] Menu refreshed from sheet (${count} items)`);
-    res.json({ ok: true, count });
+    const { count, changed } = await syncMenuFromSheet();
+    if (changed) broadcast();
+    console.log(`[backend] Menu refreshed from sheet (${count} items, ${changed ? 'updated' : 'no change'})`);
+    res.json({ ok: true, count, changed });
   } catch (err) {
     console.error('[backend] Menu refresh from sheet failed:', err.message);
     res.status(502).json({ ok: false, error: err.message });
@@ -133,13 +205,15 @@ const server = app.listen(PORT, () => {
   // Sync the menu from the live Google Sheet on startup. If the network is
   // down the app keeps running on the last-known (seed/persisted) menu.
   syncMenuFromSheet()
-    .then((count) => {
+    .then(({ count }) => {
       broadcast();
       console.log(`[backend] Menu synced from Google Sheet (${count} items)`);
     })
     .catch((err) =>
       console.warn(`[backend] Could not sync menu from sheet — using stored menu. (${err.message})`)
-    );
+    )
+    // Poll regardless of how the first sync went: the network may recover.
+    .finally(startMenuPolling);
 });
 
 // If the port is still held by a leftover process, explain how to fix it

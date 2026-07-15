@@ -4,6 +4,7 @@ import StaffView from './components/StaffView';
 import OwnerView from './components/OwnerView';
 import { fetchState, saveResource, subscribeToState } from './api';
 import { User, ShieldCheck, Key, LogOut, Sun, Moon, Smartphone } from 'lucide-react';
+import logoImg from './assets/logo.jpg';
 
 const DEFAULT_MENU = [
   // Day Menu
@@ -36,17 +37,25 @@ const DEFAULT_MENU = [
   { id: 'n6', name: 'ข้อไก่ทอดงาสามสี', price: 120, category: 'ของกินเล่น', theme: 'night', emoji: '🍗', desc: 'ข้อกระดูกอ่อนไก่ชุบแป้งบางๆ ทอดโรยด้วยงาขาว งาดำ และงาขี้ม้อนกรุบกรอบ', available: true }
 ];
 
+// Extras offered in the order dialog, keyed by which storefront they belong to.
+// `food` and `drink` are replaced by the Google Sheet's รายการเสริม rows as soon
+// as the backend responds; these values are only the pre-load fallback. `night`
+// has no sheet behind it and stays curated here.
 const DEFAULT_ADDONS = {
-  day: [
+  food: [
     { id: 'a1', name: 'ไข่เจียว', price: 10 },
-    { id: 'a2', name: 'ไข่ดาว', price: 10 },
-    { id: 'a3', name: 'พิเศษ', price: 20 }
+    { id: 'a2', name: 'ไข่ดาว', price: 10 }
   ],
+  drink: [],
   night: [
     { id: 'a4', name: 'เพิ่มถังน้ำแข็งเกล็ดโต', price: 20 },
     { id: 'a5', name: 'เลมอนฝานนำเข้า', price: 15 }
   ]
 };
+
+// Pick-exactly-one groups (ขนาด / ระดับความหวาน). Replaced by the sheet's
+// รายการเสริม rows once the backend responds; the night bar has none.
+const DEFAULT_CHOICES = { food: [], drink: [], night: [] };
 
 const DEFAULT_STOCK = {
   // Day-shift stock (kitchen ingredients / limited daily dishes).
@@ -84,6 +93,10 @@ function App() {
   const [staff, setStaffLocal] = useState(DEFAULT_STAFF);
   const [settings, setSettingsLocal] = useState(DEFAULT_SETTINGS);
   const [orders, setOrdersLocal] = useState([]);
+  // Extras come from the sheet via the backend; fall back to the local
+  // defaults for anything it doesn't carry (i.e. the night bar).
+  const [addons, setAddonsLocal] = useState(DEFAULT_ADDONS);
+  const [choices, setChoicesLocal] = useState(DEFAULT_CHOICES);
 
   // Refs mirror the latest value of each shared resource so the wrapped
   // setters below can compute functional updates (prev => next) without going
@@ -129,6 +142,10 @@ function App() {
   const [loginRemember, setLoginRemember] = useState(true);
   const [toast, setToast] = useState({ show: false, message: '' });
   const [showPwaModal, setShowPwaModal] = useState(false);
+  // Status of the very first load of shared state from the backend.
+  // 'loading' -> 'ready' | 'error'. Later SSE pushes never revert this.
+  const [loadState, setLoadState] = useState('loading');
+  const [loadError, setLoadError] = useState('');
 
   // Per-tab UI preferences still live in localStorage (they are NOT shared).
   useEffect(() => {
@@ -154,11 +171,25 @@ function App() {
       if (s.stock) setStockLocal(s.stock);
       if (s.staff) setStaffLocal(s.staff);
       if (s.settings) setSettingsLocal(s.settings);
+      if (s.addons) setAddonsLocal({ ...DEFAULT_ADDONS, ...s.addons });
+      if (s.choices) setChoicesLocal({ ...DEFAULT_CHOICES, ...s.choices });
     };
-    fetchState().then(applyState).catch((err) =>
-      console.error('[app] Could not reach backend. Is it running?', err)
-    );
-    const unsubscribe = subscribeToState(applyState);
+    fetchState()
+      .then((s) => {
+        applyState(s);
+        setLoadState('ready');
+      })
+      .catch((err) => {
+        console.error('[app] Could not reach backend. Is it running?', err);
+        setLoadError(err.message || String(err));
+        setLoadState('error');
+      });
+    // An SSE push means the backend is reachable after all, so a connection
+    // that recovers on its own clears the error screen without a reload.
+    const unsubscribe = subscribeToState((s) => {
+      applyState(s);
+      setLoadState('ready');
+    });
     return unsubscribe;
   }, []);
 
@@ -232,63 +263,53 @@ function App() {
       </div>
 
       {/* CORE MOBILE SHELL */}
-      <div className={`flex flex-col flex-1 w-full max-w-md mx-auto shadow-2xl relative overflow-hidden transition-all duration-500 bg-white min-h-screen ${theme === 'day' ? 'bg-[#FDFBF7] text-[#4A3E3D]' : 'bg-[#1A120B] text-[#E8D5C4] border-x border-orange-950/20'}`}>
+      <div className={`flex flex-col flex-1 w-full max-w-md mx-auto shadow-2xl relative overflow-hidden transition-all duration-500 bg-white min-h-screen ${theme === 'day' ? 'surface-cozy text-[#4A3E3D]' : 'bg-[#1A120B] text-[#E8D5C4] border-x border-orange-950/20'}`}>
         
         {/* TOP NAVBAR */}
-        <header className={`border-b px-4 py-3 flex items-center justify-between transition-colors duration-500 ${theme === 'day' ? 'border-orange-100 bg-[#F7F3EB] text-[#4A3E3D]' : 'border-orange-950/40 bg-[#130C07] text-[#E8D5C4]'}`}>
-          <div className="flex items-center gap-2">
-            <span className={`p-1.5 rounded-lg flex items-center justify-center ${theme === 'day' ? 'bg-orange-100 text-amber-900' : 'bg-orange-950 text-[#D4A373]'}`}>
+        <header className={`px-3.5 py-3 flex items-center justify-between gap-3 transition-colors duration-500 ${theme === 'day' ? 'wood-grain text-white shadow-md' : 'border-b border-orange-950/40 bg-[#130C07] text-[#E8D5C4]'}`}>
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className={`w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 shadow-sm overflow-hidden ${theme === 'day' ? 'bg-[#FBEAD3] ring-1 ring-black/10' : 'bg-orange-950 text-[#D4A373]'}`}>
               {theme === 'day' ? (
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <rect x="4" y="3" width="16" height="18" rx="1.5" />
-                  <line x1="4" y1="9" x2="20" y2="9" />
-                  <line x1="4" y1="15" x2="20" y2="15" />
-                  <line x1="12" y1="3" x2="12" y2="21" />
-                  <circle cx="10" cy="12" r="0.75" fill="currentColor"/>
-                  <circle cx="14" cy="12" r="0.75" fill="currentColor"/>
-                </svg>
+                <img src={logoImg} alt="ตู้กับข้าวบ้านยาย" className="w-full h-full object-cover" />
               ) : (
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                   <path d="M22 3H2l10 10V21" />
                   <line x1="6" y1="21" x2="18" y2="21" />
                   <line x1="3" y1="5" x2="21" y2="5" />
                 </svg>
               )}
             </span>
-            <div>
-              <h1 className="text-sm font-extrabold font-kanit tracking-wide leading-none select-none">
-                {theme === 'day' ? settings.name : 'Siam Blend Bar'}
-              </h1>
-              <span className="text-[9px] text-neutral-400 font-medium block mt-0.5 select-none font-thai">
-                {theme === 'day' ? 'อาหารรสชาติไทยโบราณฝีมือคุณยาย' : 'Retro & Vintage Night Bar'}
-              </span>
-            </div>
+            <h1
+              className={`font-kanit font-bold tracking-wide leading-none select-none truncate ${theme === 'day' ? 'text-xl text-white [text-shadow:0_1px_3px_rgba(60,30,10,0.55)]' : 'text-sm'}`}
+            >
+              {theme === 'day' ? settings.name : 'Siam Blend Bar'}
+            </h1>
           </div>
-          
-          <div className="flex items-center gap-2">
+
+          <div className="flex items-center gap-2 flex-shrink-0">
             {/* Quick theme toggler for Customer view */}
             {role === 'customer' && (
-              <button 
+              <button
                 onClick={() => setTheme(prev => prev === 'day' ? 'night' : 'day')}
-                className={`p-1.5 rounded-full border transition-all duration-300 ${theme === 'day' ? 'bg-white hover:bg-neutral-100 border-neutral-200 text-neutral-500' : 'bg-neutral-800 hover:bg-neutral-700 border-neutral-700 text-[#D4A373]'}`}
+                className={`w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 shadow-sm ${theme === 'day' ? 'bg-white/95 hover:bg-white text-[#6B4021]' : 'bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-[#D4A373]'}`}
                 title="เปลี่ยนช่วงเวลา/ธีม"
               >
-                {theme === 'day' ? <Moon className="w-3.5 h-3.5" /> : <Sun className="w-3.5 h-3.5" />}
+                {theme === 'day' ? <Moon className="w-5 h-5" /> : <Sun className="w-4 h-4" />}
               </button>
             )}
 
             {/* Role Switcher Selector */}
             <div className="relative">
-              <button 
+              <button
                 onClick={() => setShowRoleDropdown(prev => !prev)}
-                className={`flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-full border font-bold font-thai tracking-wide transition-all ${theme === 'day' ? 'bg-white/90 hover:bg-neutral-50 border-neutral-200 text-neutral-700' : 'bg-neutral-900/90 border-neutral-800 text-neutral-300 hover:bg-neutral-800'}`}
+                className={`flex items-center gap-1.5 rounded-full font-kanit font-semibold tracking-wide transition-all ${theme === 'day' ? 'bg-white/95 hover:bg-white text-[#6B4021] text-base px-5 py-2 shadow-sm' : 'bg-neutral-900/90 border border-neutral-800 text-neutral-300 hover:bg-neutral-800 text-[11px] px-2.5 py-1.5'}`}
               >
-                <User className="w-3 h-3 text-amber-600" />
+                {theme !== 'day' && <User className="w-3 h-3 text-amber-600" />}
                 <span>
                   {role === 'customer' ? `โต๊ะ ${tableNo}` : role === 'staff' ? 'พนักงาน' : 'ผู้บริหาร'}
                 </span>
               </button>
-              
+
               {showRoleDropdown && (
                 <>
                   <div className="fixed inset-0 z-40" onClick={() => setShowRoleDropdown(false)} />
@@ -357,8 +378,46 @@ function App() {
 
         {/* MAIN BODY LAYOUT */}
         <main className="flex-1 overflow-y-auto p-4 space-y-4">
-          {role === 'customer' && (
-            <CustomerView 
+          {/* First-load states. Once state has arrived these never show again,
+              so live SSE updates don't flash a spinner over the menu. */}
+          {loadState === 'loading' && (
+            <div className="py-16 text-center space-y-3 font-thai">
+              <div className="w-8 h-8 mx-auto rounded-full border-2 border-[#A9713D]/25 border-t-[#A9713D] animate-spin" />
+              <p className="text-xs text-neutral-400 font-medium">กำลังโหลดเมนูจาก Google Sheets...</p>
+            </div>
+          )}
+
+          {loadState === 'error' && (
+            <div className="py-12 px-4 text-center space-y-3 font-thai">
+              <span className="text-3xl">📡</span>
+              <h3 className="font-kanit font-bold text-sm text-[#5A2E14]">โหลดข้อมูลไม่สำเร็จ</h3>
+              <p className="text-xs text-neutral-500 leading-relaxed">
+                ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ของร้านได้ กรุณาตรวจสอบว่าเปิดระบบหลังบ้านอยู่ แล้วลองใหม่อีกครั้ง
+              </p>
+              {loadError && (
+                <p className="text-[10px] text-neutral-400 font-mono break-all bg-neutral-100 rounded-lg p-2">
+                  {loadError}
+                </p>
+              )}
+              <button
+                onClick={() => window.location.reload()}
+                className="text-xs bg-[#A9713D] hover:bg-[#8A5A32] text-white font-bold py-2.5 px-5 rounded-xl transition"
+              >
+                ลองใหม่อีกครั้ง
+              </button>
+            </div>
+          )}
+
+          {loadState === 'ready' && menu.length === 0 && (
+            <div className="py-16 text-center space-y-2 font-thai">
+              <span className="text-3xl">🍽️</span>
+              <h3 className="font-kanit font-bold text-sm text-[#5A2E14]">ยังไม่มีรายการอาหาร</h3>
+              <p className="text-xs text-neutral-400">ยังไม่มีเมนูในระบบขณะนี้ กรุณาติดต่อพนักงาน</p>
+            </div>
+          )}
+
+          {loadState === 'ready' && menu.length > 0 && role === 'customer' && (
+            <CustomerView
               theme={theme} 
               tableNo={tableNo} 
               menu={menu} 
@@ -368,13 +427,14 @@ function App() {
               setStock={setStock}
               cart={cart}
               setCart={setCart}
-              addons={DEFAULT_ADDONS}
+              addons={addons}
+              choices={choices}
               showToast={showToast}
             />
           )}
 
-          {role === 'staff' && (
-            <StaffView 
+          {loadState === 'ready' && role === 'staff' && (
+            <StaffView
               theme={theme} 
               menu={menu} 
               orders={orders}
@@ -384,12 +444,13 @@ function App() {
               settings={settings}
               activeStaffUser={activeStaffUser}
               showToast={showToast}
-              addons={DEFAULT_ADDONS}
+              addons={addons}
+              choices={choices}
             />
           )}
 
-          {role === 'owner' && (
-            <OwnerView 
+          {loadState === 'ready' && role === 'owner' && (
+            <OwnerView
               theme={theme} 
               menu={menu}
               setMenu={setMenu} 

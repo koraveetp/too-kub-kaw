@@ -7,11 +7,20 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['Prompt', 'Sarabun', 'system-ui', 'sans-serif'],
-        thai: ['IBM Plex Sans Thai', 'sans-serif'],
+        sans: ['"Noto Sans Thai"', '"Open Sans"', 'system-ui', 'sans-serif'],
+        thai: ['"Noto Sans Thai"', '"Open Sans"', 'sans-serif'],
         mono: ['IBM Plex Mono', 'monospace'],
-        kanit: ['Kanit', 'sans-serif'],
-      }
+        kanit: ['Prompt', '"Noto Sans Thai"', 'sans-serif'],
+      },
+      colors: {
+        wood: {
+          DEFAULT: '#8A5A32',
+          dark: '#6B4021',
+          light: '#A9713D',
+        },
+        cocoa: '#5A2E14',
+        clay: '#7B2D12',
+      },
     },
   },
   plugins: [],
