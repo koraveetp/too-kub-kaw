@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ShoppingBag, ShoppingBasket, Trash2, X, Plus, Minus, CheckCircle } from 'lucide-react';
 import { isDrinkItem, addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
+import { shiftNow } from '../shift';
 import foodImg from '../assets/food.jpg';
 import beverageImg from '../assets/beverage.jpg';
 
@@ -181,7 +182,8 @@ function CustomerView({
       no: orderNo,
       time: new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }),
       createdAt: Date.now(),
-      type: theme,
+      // Shift is stamped from the wall clock at creation, not the browsed theme.
+      type: shiftNow(),
       table: tableNo,
       items: cart.map(item => ({
         name: item.name,

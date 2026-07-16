@@ -1,19 +1,22 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
+import { shiftNow, orderShift } from '../shift';
 import {
-  ClipboardList, 
-  LayoutGrid, 
-  Package, 
-  RefreshCw, 
-  Plus, 
-  Minus, 
-  Trash2, 
-  QrCode, 
-  PlusCircle, 
+  ClipboardList,
+  LayoutGrid,
+  Package,
+  RefreshCw,
+  Plus,
+  Minus,
+  Trash2,
+  QrCode,
+  PlusCircle,
   AlertTriangle,
   Check,
   Edit,
-  X
+  X,
+  Sun,
+  Moon
 } from 'lucide-react';
 
 function StaffView({ 
@@ -31,6 +34,9 @@ function StaffView({
 }) {
   const [subTab, setSubTab] = useState('orders'); // orders, take-order, tables, stock, qrcode
   const [orderFilter, setOrderFilter] = useState('active'); // active, new, cooking, served, paid, all
+  // Which shift's orders the board shows + notifies for. Defaults to the shift
+  // the wall clock is in right now, so staff see the shift they're working.
+  const [shiftView, setShiftView] = useState(() => shiftNow());
   
   // Direct ordering states
   const [targetTable, setTargetTable] = useState('1');
@@ -44,9 +50,79 @@ function StaffView({
   const [selectedChoices, setSelectedChoices] = useState({});
   const [detailMode, setDetailMode] = useState('cart'); // 'cart' (take-order) | 'editbill'
 
+  // Custom "เมนูอื่นๆ" — a staff-typed item that isn't on the menu (never
+  // touches stock). Extras are toggle chips with editable prices; takeaway is a
+  // flag surfaced to the kitchen.
+  const [showCustomModal, setShowCustomModal] = useState(false);
+  const [customName, setCustomName] = useState('');
+  const [customPrice, setCustomPrice] = useState('');
+  const [customQty, setCustomQty] = useState(1);
+  const [customNote, setCustomNote] = useState('');
+  const [customTakeaway, setCustomTakeaway] = useState(false);
+  const [customExtras, setCustomExtras] = useState({
+    'ไข่ดาว': { on: false, price: 10 },
+    'ไข่เจียว': { on: false, price: 15 },
+    'กับข้าว': { on: false, price: 20 }
+  });
+
   // Edit Bill states
   const [editingBill, setEditingBill] = useState(null); // holds the order object being edited
   const [editAddMenuId, setEditAddMenuId] = useState('');
+
+  // --- New-order notifications (toast + sound) ------------------------------
+  // Track which order ids we've already seen so the first load doesn't fire a
+  // burst of toasts. On mount every current order is marked seen silently; only
+  // genuinely new orders that match the selected shift notify thereafter.
+  const seenOrderIds = useRef(null);
+  const audioCtxRef = useRef(null);
+
+  // A short "ding-dong" via the Web Audio API — no audio file to ship, and a
+  // blocked/suspended context can never break the board (best-effort only).
+  const playChime = () => {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      if (!audioCtxRef.current) audioCtxRef.current = new Ctx();
+      const ctx = audioCtxRef.current;
+      if (ctx.state === 'suspended') ctx.resume();
+      const now = ctx.currentTime;
+      [[880, 0], [1174, 0.14]].forEach(([freq, at]) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.0001, now + at);
+        gain.gain.exponentialRampToValueAtTime(0.3, now + at + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + at + 0.25);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now + at);
+        osc.stop(now + at + 0.26);
+      });
+    } catch {
+      /* audio is best-effort */
+    }
+  };
+
+  useEffect(() => {
+    // First run: remember everything already on the board without notifying.
+    if (seenOrderIds.current === null) {
+      seenOrderIds.current = new Set(orders.map(o => o.id));
+      return;
+    }
+    const fresh = orders.filter(o => !seenOrderIds.current.has(o.id));
+    if (fresh.length === 0) return;
+    const matching = fresh.filter(o => o.status === 'new' && orderShift(o) === shiftView);
+    // Mark every fresh order seen (even the other shift's) so a later shift
+    // toggle doesn't replay them as if they had only just arrived.
+    fresh.forEach(o => seenOrderIds.current.add(o.id));
+    if (matching.length > 0) {
+      const label = shiftView === 'day' ? 'กลางวัน' : 'กลางคืน';
+      matching.forEach(o =>
+        showToast(`🔔 ออเดอร์ใหม่ (${label}) โต๊ะ ${o.table} · ฿${(o.total || 0).toLocaleString()}`)
+      );
+      playChime();
+    }
+  }, [orders, shiftView]);
 
   const isDay = theme === 'day';
   const filteredMenu = menu.filter(item => item.theme === theme);
@@ -60,7 +136,10 @@ function StaffView({
 
   // Filter orders for listing
   const getFilteredOrders = () => {
-    let list = [...orders].sort((a, b) => b.createdAt - a.createdAt);
+    // Screen the board to the selected shift first, then by status.
+    let list = [...orders]
+      .filter(o => orderShift(o) === shiftView)
+      .sort((a, b) => b.createdAt - a.createdAt);
     if (orderFilter === 'active') {
       return list.filter(o => o.status !== 'paid' && o.status !== 'cancelled');
     }
@@ -72,7 +151,10 @@ function StaffView({
 
   const payOrder = (order) => {
     if (confirm(`ยืนยันการเช็คบิล โต๊ะ ${order.table} ยอดรวม ฿${order.total.toLocaleString()} ใช่หรือไม่?`)) {
+      // Kept in `orders` as paid history (OwnerView reports read it); the table
+      // frees up on its own since getTableStatus ignores paid bills.
       setOrders(prev => prev.map(o => (o.id === order.id ? { ...o, status: 'paid' } : o)));
+      clearTableWorkspace(order.table);
       showToast(`เช็คบิล โต๊ะ ${order.table} เรียบร้อยแล้ว`);
     }
   };
@@ -182,6 +264,63 @@ function StaffView({
     setTakeOrderCart(prev => prev.filter(item => item.id !== itemId));
   };
 
+  // --- Custom "เมนูอื่นๆ" handlers -------------------------------------------
+  const openCustomModal = () => {
+    setCustomName('');
+    setCustomPrice('');
+    setCustomQty(1);
+    setCustomNote('');
+    setCustomTakeaway(false);
+    setCustomExtras({
+      'ไข่ดาว': { on: false, price: 10 },
+      'ไข่เจียว': { on: false, price: 15 },
+      'กับข้าว': { on: false, price: 20 }
+    });
+    setShowCustomModal(true);
+  };
+
+  const toggleCustomExtra = (name) => {
+    setCustomExtras(prev => ({ ...prev, [name]: { ...prev[name], on: !prev[name].on } }));
+  };
+
+  const setCustomExtraPrice = (name, val) => {
+    const price = Math.max(0, Number(val) || 0);
+    setCustomExtras(prev => ({ ...prev, [name]: { ...prev[name], price } }));
+  };
+
+  // Selected extras (with their edited prices) + the sums used for the total.
+  const customSelectedExtras = Object.entries(customExtras)
+    .filter(([, v]) => v.on)
+    .map(([name, v]) => ({ name, price: Number(v.price) || 0 }));
+  const customAddonCost = customSelectedExtras.reduce((sum, e) => sum + e.price, 0);
+  const customPriceNum = Number(customPrice) || 0;
+  const customValid = customName.trim() !== '' && customPriceNum > 0;
+  const customLiveTotal = (customPriceNum + customAddonCost) * customQty;
+
+  const handleAddCustomToCart = () => {
+    if (!customValid) return; // ชื่อห้ามว่าง, ราคา > 0
+    // Extras carry their price in the label so the kitchen/bill shows both.
+    const addonNames = customSelectedExtras.map(e => `${e.name} +฿${e.price}`);
+    if (customTakeaway) addonNames.push('🏠 กลับบ้าน');
+
+    const cartItem = {
+      id: 'custom_' + Date.now().toString(36),
+      menuId: 'custom',
+      name: customName.trim(),
+      basePrice: customPriceNum,
+      price: customPriceNum,
+      addonCost: customAddonCost,
+      qty: customQty,
+      addons: addonNames,
+      note: customNote,
+      stockRef: null // custom items never deduct stock
+    };
+
+    setTakeOrderCart(prev => [...prev, cartItem]);
+    setShowCustomModal(false);
+    showToast(`เพิ่ม ${cartItem.name} ลงบิลเรียบร้อย`);
+  };
+
   const handlePlaceDirectOrder = () => {
     if (takeOrderCart.length === 0) return;
 
@@ -218,7 +357,8 @@ function StaffView({
       no: orderNo,
       time: new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }),
       createdAt: Date.now(),
-      type: theme,
+      // Shift is stamped from the wall clock at creation, not the active theme.
+      type: shiftNow(),
       table: targetTable,
       items: takeOrderCart.map(item => ({
         name: item.name,
@@ -242,7 +382,7 @@ function StaffView({
 
   // Edit Bill Modal handlers
   const handleOpenEditBill = (table) => {
-    const activeBill = orders.find(o => String(o.table) === String(table) && o.type === theme && o.status !== 'paid' && o.status !== 'cancelled');
+    const activeBill = orders.find(o => String(o.table) === String(table) && o.status !== 'paid' && o.status !== 'cancelled');
     if (activeBill) {
       setEditingBill(JSON.parse(JSON.stringify(activeBill))); // Deep copy
       setEditAddMenuId('');
@@ -299,19 +439,43 @@ function StaffView({
     setEditingBill(null);
   };
 
-  const handleClearAndPay = (table) => {
-    const activeBill = orders.find(o => String(o.table) === String(table) && o.type === theme && o.status !== 'paid' && o.status !== 'cancelled');
-    if (activeBill) {
-      if (confirm(`ยืนยันการเช็คบิล โต๊ะ ${table} ยอดรวม ฿${activeBill.total.toLocaleString()} ใช่หรือไม่?`)) {
-        setOrders(prev => prev.map(o => {
-          if (o.id === activeBill.id) {
-            return { ...o, status: 'paid' };
-          }
-          return o;
-        }));
-        showToast(`เช็คบิล โต๊ะ ${table} เรียบร้อยแล้ว`);
-      }
+  // Wipe any in-progress staff workspace still tied to a table, so a freshly
+  // paid/cleared table starts clean for the next group — no old take-order cart,
+  // no stale edit-bill modal bleeding one session's data into the next.
+  const clearTableWorkspace = (table) => {
+    const same = (t) => String(t) === String(table);
+    if (editingBill && same(editingBill.table)) setEditingBill(null);
+    if (same(targetTable)) setTakeOrderCart([]);
+    // Close the item-detail modal if it was opened for this table's flow.
+    if (
+      selectedItem &&
+      ((detailMode === 'editbill' && editingBill && same(editingBill.table)) ||
+        (detailMode === 'cart' && same(targetTable)))
+    ) {
+      setSelectedItem(null);
     }
+  };
+
+  const handleClearAndPay = (table) => {
+    // Settle the whole table: pay EVERY active bill on it (same predicate
+    // getTableStatus uses), so afterwards getTableStatus finds nothing
+    // outstanding and the table reliably flips back to "ว่าง". Table occupancy
+    // is shift-agnostic — a physical table is busy if it has ANY open bill,
+    // regardless of whether it was placed in the day or night shift.
+    const activeBills = orders.filter(
+      o => String(o.table) === String(table) && o.status !== 'paid' && o.status !== 'cancelled'
+    );
+    if (activeBills.length === 0) return;
+    const grandTotal = activeBills.reduce((sum, o) => sum + (o.total || 0), 0);
+    if (!confirm(`ยืนยันการเช็คบิล โต๊ะ ${table} ยอดรวม ฿${grandTotal.toLocaleString()} ใช่หรือไม่?`)) return;
+
+    // Mark paid — kept in `orders` as history so OwnerView's Excel report still
+    // sees them (never removed).
+    const paidIds = new Set(activeBills.map(o => o.id));
+    setOrders(prev => prev.map(o => (paidIds.has(o.id) ? { ...o, status: 'paid' } : o)));
+    // Free the table for the next group: drop any lingering workspace bound to it.
+    clearTableWorkspace(table);
+    showToast(`เช็คบิล โต๊ะ ${table} เรียบร้อยแล้ว โต๊ะพร้อมรับลูกค้าใหม่`);
   };
 
   // Restock every item of the current shift (day ingredients vs night drinks).
@@ -334,9 +498,12 @@ function StaffView({
     showToast(`${item.name} +${amount} (คงเหลือ ${item.count + amount})`);
   };
 
-  // Helper: check table status
+  // Helper: check table status. Occupancy is shift-agnostic — the table is busy
+  // whenever it has any unpaid/uncancelled bill, no matter which shift (day/night)
+  // the order was stamped with, so an order never "disappears" just because the
+  // ambient theme differs from the order's clock-based type.
   const getTableStatus = (tableNum) => {
-    const activeBill = orders.find(o => String(o.table) === String(tableNum) && o.type === theme && o.status !== 'paid' && o.status !== 'cancelled');
+    const activeBill = orders.find(o => String(o.table) === String(tableNum) && o.status !== 'paid' && o.status !== 'cancelled');
     if (activeBill) {
       return { active: true, bill: activeBill };
     }
@@ -349,6 +516,29 @@ function StaffView({
         const filteredOrders = getFilteredOrders();
         return (
           <div className="space-y-4">
+            {/* SHIFT SELECTOR — screens the board (and notifications) by shift */}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400">กะที่แสดง</span>
+              <div className="flex gap-1 bg-neutral-100 rounded-xl p-1 text-[11px] font-bold">
+                {[
+                  { k: 'day', l: 'กลางวัน', icon: Sun },
+                  { k: 'night', l: 'กลางคืน', icon: Moon }
+                ].map(s => {
+                  const Icon = s.icon;
+                  return (
+                    <button
+                      key={s.k}
+                      onClick={() => setShiftView(s.k)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition ${s.k === shiftView ? 'bg-white text-neutral-800 shadow-xs' : 'text-neutral-500 hover:text-neutral-700'}`}
+                    >
+                      <Icon className="w-3.5 h-3.5" />
+                      <span>{s.l}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
               {[
                 { k: 'active', l: 'กำลังทำงาน (ค้างชำระ)' },
@@ -486,6 +676,15 @@ function StaffView({
                   );
                 })}
               </div>
+
+              {/* Custom item entry — staff types a menu item that isn't listed */}
+              <button
+                onClick={openCustomModal}
+                className="w-full flex items-center justify-center gap-1.5 border-2 border-dashed border-neutral-300 hover:border-amber-500 hover:bg-amber-50 text-neutral-600 hover:text-amber-700 font-bold py-2.5 rounded-xl transition text-xs"
+              >
+                <Plus className="w-4 h-4" />
+                <span>เมนูอื่นๆ (คีย์เอง)</span>
+              </button>
             </div>
 
             {/* Direct Cart Summary */}
@@ -882,6 +1081,134 @@ function StaffView({
                 className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl transition text-center text-xs"
               >
                 {detailMode === 'editbill' ? 'เพิ่มลงบิล' : 'ใส่บิล'} (฿{((selectedItem.price + selectedAddons.reduce((sum, a) => sum + a.price, 0) + choicesCost(selectedChoices)) * modalQty).toLocaleString()})
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* CUSTOM ITEM MODAL ("เมนูอื่นๆ") — staff-typed item + editable extras */}
+      {showCustomModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end justify-center p-0">
+          <div className="bg-white rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
+
+            <div className="flex justify-between items-start">
+              <div>
+                <h3 className="text-base font-extrabold font-kanit">เมนูอื่นๆ (คีย์เอง)</h3>
+                <span className="text-[10px] text-neutral-400 font-medium">รับออเดอร์ โต๊ะ {targetTable}</span>
+              </div>
+              <button
+                onClick={() => setShowCustomModal(false)}
+                className="p-1.5 rounded-full bg-neutral-100 hover:bg-neutral-200 text-neutral-500 transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* NAME (required) */}
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">ชื่อเมนู <span className="text-red-500">*</span></label>
+              <input
+                type="text"
+                value={customName}
+                onChange={e => setCustomName(e.target.value)}
+                placeholder="เช่น ข้าวไข่ข้น, น้ำเปล่าพิเศษ..."
+                className="w-full text-xs border border-neutral-200 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-amber-500"
+              />
+            </div>
+
+            {/* PRICE (required, > 0) */}
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">ราคา/ชิ้น (บาท) <span className="text-red-500">*</span></label>
+              <input
+                type="number"
+                min="0"
+                inputMode="numeric"
+                value={customPrice}
+                onChange={e => setCustomPrice(e.target.value)}
+                placeholder="0"
+                className="w-full text-xs border border-neutral-200 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono font-bold"
+              />
+            </div>
+
+            {/* EXTRAS — toggle chips with editable prices */}
+            <div className="space-y-2">
+              <h4 className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400">ตัวเลือกเพิ่มเติม (กดเลือก)</h4>
+              <div className="space-y-1.5">
+                {Object.entries(customExtras).map(([name, v]) => (
+                  <div
+                    key={name}
+                    className={`flex items-center justify-between gap-2 p-2.5 border rounded-xl transition text-xs font-thai ${v.on ? 'border-amber-500 bg-amber-50 ring-1 ring-amber-500' : 'border-neutral-150'}`}
+                  >
+                    <button
+                      onClick={() => toggleCustomExtra(name)}
+                      className="flex items-center gap-2 flex-1 text-left"
+                    >
+                      <span className={`w-4 h-4 rounded flex items-center justify-center border ${v.on ? 'bg-amber-600 border-amber-600 text-white' : 'border-neutral-300 bg-white'}`}>
+                        {v.on && <Check className="w-3 h-3 stroke-[3]" />}
+                      </span>
+                      <span className="font-semibold text-neutral-700">{name}</span>
+                    </button>
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      <span className="text-neutral-400 font-bold">+฿</span>
+                      <input
+                        type="number"
+                        min="0"
+                        value={v.price}
+                        onChange={e => setCustomExtraPrice(name, e.target.value)}
+                        className="w-16 text-xs border border-neutral-200 rounded-lg p-1.5 focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono font-bold text-right"
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* TAKEAWAY toggle */}
+            <button
+              onClick={() => setCustomTakeaway(prev => !prev)}
+              className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl font-bold text-xs transition border ${customTakeaway ? 'bg-amber-600 border-amber-600 text-white' : 'bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50'}`}
+            >
+              <span>🏠</span>
+              <span>{customTakeaway ? 'กลับบ้าน (เปิดอยู่)' : 'กลับบ้าน'}</span>
+            </button>
+
+            {/* NOTES */}
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">หมายเหตุเพิ่มเติมถึงครัว</label>
+              <textarea
+                value={customNote}
+                onChange={e => setCustomNote(e.target.value)}
+                placeholder="เช่น ขอเผ็ดน้อย, ไม่ใส่ผักชี, หรืออื่นๆ..."
+                className="w-full text-xs border border-neutral-200 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-amber-500 h-16 resize-none"
+              />
+            </div>
+
+            {/* QUANTITY & CONFIRM */}
+            <div className="flex items-center justify-between gap-4 pt-3 border-t border-neutral-100">
+              <div className="flex items-center gap-3.5 border border-neutral-200 rounded-xl px-3 py-1.5">
+                <button
+                  onClick={() => setCustomQty(prev => Math.max(1, prev - 1))}
+                  className="p-1 text-neutral-500 hover:bg-neutral-100 rounded-lg transition"
+                >
+                  <Minus className="w-3.5 h-3.5 stroke-[2.5]" />
+                </button>
+                <span className="font-mono font-extrabold text-sm w-5 text-center">{customQty}</span>
+                <button
+                  onClick={() => setCustomQty(prev => prev + 1)}
+                  className="p-1 text-neutral-500 hover:bg-neutral-100 rounded-lg transition"
+                >
+                  <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+                </button>
+              </div>
+
+              <button
+                onClick={handleAddCustomToCart}
+                disabled={!customValid}
+                className="flex-1 bg-amber-600 hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold py-3 rounded-xl transition text-center text-xs"
+              >
+                ใส่บิล (฿{customLiveTotal.toLocaleString()})
               </button>
             </div>
 
