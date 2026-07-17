@@ -2,9 +2,9 @@
 // not exist yet). After that, the live state lives in backend/data.json.
 export const SEED = {
   orders: [],
-  // Baked-in copy of the published Google Sheet menu (see backend/menu-sheet.js).
-  // Used as the offline fallback; the server re-syncs from the live sheet on
-  // startup and whenever POST /api/menu/refresh is called.
+  // Baked-in copy of the menu, used as the offline fallback. The server
+  // re-syncs from PostgreSQL (backend/menu-db.js) on startup and whenever
+  // POST /api/menu/refresh is called.
   menu: [
     { id: "d1", name: "ทอดน้ำปลาราดข้าว", price: 50, category: "อาหารจานเดียว", theme: 'day', emoji: "🐟", desc: '', options: [{ name: "หมู", price: 50 }, { name: "ไก่", price: 50 }, { name: "หมูกรอบ", price: 60 }, { name: "ทะเล", price: 70 }], available: true },
     { id: "d2", name: "ผัดน้ำมันหอยราดข้าว", price: 50, category: "อาหารจานเดียว", theme: 'day', emoji: "🐚", desc: '', options: [{ name: "หมู", price: 50 }, { name: "ไก่", price: 50 }, { name: "หมูกรอบ", price: 60 }, { name: "ทะเล", price: 70 }], available: true },
@@ -39,7 +39,7 @@ export const SEED = {
     { id: "d31", name: "ผัดพริกเผาหอยลาย", price: 80, category: "กับข้าว", theme: 'day', emoji: "🐚", desc: '', options: [], available: true },
     { id: "d32", name: "แกงส้ม", price: 80, category: "กับข้าว", theme: 'day', emoji: "🥘", desc: '', options: [{ name: "ปลา", price: 80 }, { name: "หมู", price: 80 }, { name: "กุ้ง", price: 80 }], available: true },
     { id: "d33", name: "ข้าวสวย", price: 20, category: "เพิ่มเติม", theme: 'day', emoji: "🍚", desc: '', options: [], available: true },
-    // Beverages (เครื่องดื่ม_day tab, see SHEET_CSV_URL_DRINKS in menu-sheet.js).
+    // Beverages (เครื่องดื่ม rows in the menu_items table).
     { id: "bev1", name: "ชาดำเย็น", price: 35, category: "ชา", theme: 'day', emoji: "🍵", desc: '', options: [{ name: "M", price: 35 }, { name: "L", price: 40 }], available: true },
     { id: "bev2", name: "ชาเย็น", price: 35, category: "ชา", theme: 'day', emoji: "🍵", desc: '', options: [{ name: "M", price: 35 }, { name: "L", price: 40 }], available: true },
     { id: "bev3", name: "ชาเขียวลองกรีน", price: 35, category: "ชา", theme: 'day', emoji: "🍵", desc: '', options: [{ name: "M", price: 35 }, { name: "L", price: 40 }], available: true },

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ShoppingBag, ShoppingBasket, Trash2, X, Plus, Minus, CheckCircle } from 'lucide-react';
 import { isDrinkItem, addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
+import { mergeOrder, itemRound } from '../orders';
 import { shiftNow } from '../shift';
 import foodImg from '../assets/food.jpg';
 import beverageImg from '../assets/beverage.jpg';
@@ -199,7 +200,9 @@ function CustomerView({
       by: 'ลูกค้าสแกน'
     };
 
-    setOrders(prev => [...prev, newOrder]);
+    // Merge into this table's open bill (as a new round) if it hasn't checked
+    // out yet; otherwise this opens a fresh bill.
+    setOrders(prev => mergeOrder(prev, newOrder));
     setCart([]);
     setShowCartModal(false);
     setShowSuccessNotice(true);
@@ -207,9 +210,17 @@ function CustomerView({
     setShowStatusList(true); // Auto switch to status page
   };
 
-  // Get orders placed by this specific table
+  // Orders of the CURRENT session at this table only. Once a bill is checked
+  // out it becomes 'paid' (and 'cancelled' bills are likewise closed), so the
+  // moment customer A pays, their orders drop out of view — the next customer B
+  // at the same table sees a clean history with only their own orders. This is
+  // the same "active bill" predicate the staff/table-status logic uses.
   const tableOrders = orders
-    .filter(o => String(o.table) === String(tableNo))
+    .filter(o =>
+      String(o.table) === String(tableNo) &&
+      o.status !== 'paid' &&
+      o.status !== 'cancelled'
+    )
     .sort((a, b) => b.createdAt - a.createdAt);
 
   const getStatusLabel = (status) => {
@@ -277,21 +288,36 @@ function CustomerView({
                   </div>
 
                   <div className="space-y-1.5">
-                    {order.items.map((item, idx) => (
-                      <div key={idx} className="flex justify-between items-start text-xs">
-                        <div>
-                          <span className="font-extrabold text-amber-700 dark:text-[#D4A373] mr-1.5">{item.qty}×</span>
-                          <span className="font-semibold">{item.name}</span>
-                          {item.addOns && item.addOns.length > 0 && (
-                            <p className="text-[9px] text-neutral-400 pl-5 font-medium">ตัวเลือก: {item.addOns.join(', ')}</p>
+                    {order.items.map((item, idx) => {
+                      // Draw a divider whenever a new ordering round begins, so
+                      // "ordered more later" is visually separated from the
+                      // first order on the same ticket.
+                      const showRoundDivider = idx > 0 && itemRound(item) !== itemRound(order.items[idx - 1]);
+                      return (
+                        <React.Fragment key={idx}>
+                          {showRoundDivider && (
+                            <div className="flex items-center gap-2 pt-1.5 text-[9px] text-neutral-400 font-semibold">
+                              <span className="h-px flex-1 bg-neutral-200 dark:bg-orange-950/50" />
+                              สั่งเพิ่ม · รอบที่ {itemRound(item)}
+                              <span className="h-px flex-1 bg-neutral-200 dark:bg-orange-950/50" />
+                            </div>
                           )}
-                          {item.note && (
-                            <p className="text-[9px] text-orange-900/60 dark:text-[#D4A373]/60 pl-5 italic font-medium">📝 "{item.note}"</p>
-                          )}
-                        </div>
-                        <span className="font-mono text-neutral-500">฿{((item.price + (item.addonCost || 0)) * item.qty).toLocaleString()}</span>
-                      </div>
-                    ))}
+                          <div className="flex justify-between items-start text-xs">
+                            <div>
+                              <span className="font-extrabold text-amber-700 dark:text-[#D4A373] mr-1.5">{item.qty}×</span>
+                              <span className="font-semibold">{item.name}</span>
+                              {item.addOns && item.addOns.length > 0 && (
+                                <p className="text-[9px] text-neutral-400 pl-5 font-medium">ตัวเลือก: {item.addOns.join(', ')}</p>
+                              )}
+                              {item.note && (
+                                <p className="text-[9px] text-orange-900/60 dark:text-[#D4A373]/60 pl-5 italic font-medium">📝 "{item.note}"</p>
+                              )}
+                            </div>
+                            <span className="font-mono text-neutral-500">฿{((item.price + (item.addonCost || 0)) * item.qty).toLocaleString()}</span>
+                          </div>
+                        </React.Fragment>
+                      );
+                    })}
                   </div>
 
                   <div className="border-t border-dashed border-neutral-200/80 mt-3 pt-2.5 flex justify-between items-center text-xs">

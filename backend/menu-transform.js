@@ -1,14 +1,15 @@
 // ---------------------------------------------------------------------------
-// Google Sheet -> menu bridge
+// Menu row -> app shape transforms (source-agnostic)
 // ---------------------------------------------------------------------------
-// The restaurant menu lives in a Google Sheet exposed as JSON by an Apps Script
-// Web App (see sheets-api.js for the transport). This module maps the
-// "Menu_Main" tab onto the shape the app expects:
+// These pure functions map one-row-per-variant menu data onto the shape the
+// app expects. They know nothing about WHERE the rows came from — the
+// PostgreSQL bridge (menu-db.js) feeds them rows keyed by the same Thai column
+// names the data was originally authored with.
 //
 //     { id, name, price, category, group, theme, emoji, image, desc,
 //       options, available }
 //
-// Menu_Main is normalised, one row per sellable variant:
+// One normalised row per sellable variant:
 //
 //   หมวดหมู่     อาหาร | เพิ่มเติม | ของหวาน | เครื่องดื่ม   -> food/drink group
 //   ประเภท       เมนูหลัก (a dish) | รายการเสริม (an add-on)
@@ -22,11 +23,7 @@
 // list carries the protein choices, e.g. ทอดน้ำปลาราดข้าว -> หมู/ไก่/หมูกรอบ/ทะเล.
 // ---------------------------------------------------------------------------
 
-import { fetchSheets, getTab, cleanRows, toNumber, text } from './sheets-api.js';
-
-export const MENU_TAB = 'Menu_Main';
-
-// Column names, kept here so a sheet rename is a one-line fix.
+// Column names, kept here so a schema rename is a one-line fix.
 const COL = {
   group: 'หมวดหมู่',
   kind: 'ประเภท',
@@ -46,9 +43,30 @@ const DRINK_GROUP = 'เครื่องดื่ม';   // หมวดหม
 //   everything else -> tick as many as you like (checkbox), e.g. ท็อปปิ้ง
 const CHOICE_HEADINGS = ['ขนาด', 'ระดับความหวาน'];
 
+// --- Cell helpers -----------------------------------------------------------
+
+// Value -> usable number. Accepts a number (55) or a string ("55", "55 บาท",
+// "-", ""). Returns `fallback` for anything that isn't a usable figure.
+export function toNumber(value, fallback = 0) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : fallback;
+  const raw = String(value ?? '').trim();
+  if (!raw || raw === '-') return fallback;
+  const n = Number(raw.replace(/[^0-9.-]/g, ''));
+  return Number.isFinite(n) ? n : fallback;
+}
+
+// Cell -> trimmed string. "-" is the "not applicable" marker, so it reads as
+// empty.
+export function text(value) {
+  const raw = String(value ?? '').trim();
+  return raw === '-' ? '' : raw;
+}
+
+// --- Emoji fallback ---------------------------------------------------------
+
 // Pick a fitting emoji from the dish name so the menu isn't a wall of 🍽️.
 // Ordered most-specific first (protein/ingredient, then cooking style).
-// Used only as a fallback for the ~15% of rows with no รูปภาพ.
+// Used only as a fallback for the rows with no รูปภาพ.
 const EMOJI_RULES = [
   ['ทะเล', '🦐'], ['กุ้ง', '🍤'], ['หอย', '🐚'], ['ปู', '🦀'],
   ['ปลาดุก', '🐟'], ['ปลาเค็ม', '🐟'], ['ปลา', '🐟'],
@@ -72,13 +90,10 @@ function emojiFor(name) {
   return '🍽️';
 }
 
-// The sheet is inconsistent about where the protein lives: เมนูราดข้าว rows
-// keep the name clean ("ทอดน้ำปลาราดข้าว" + เนื้อสัตว์ "หมู"), while เมนูต้ม rows
-// repeat it in the name ("ต้มจืดเต้าหู้ หมูสับ" + เนื้อสัตว์ "หมูสับ"). Strip the
-// trailing protein so both conventions group into one dish.
-//
-// This uses the row's own เนื้อสัตว์ value rather than a hardcoded protein list,
-// so it keeps working when the owner adds a new protein to the sheet.
+// The data is inconsistent about where the protein lives: เมนูราดข้าว rows keep
+// the name clean ("ทอดน้ำปลาราดข้าว" + เนื้อสัตว์ "หมู"), while เมนูต้ม rows repeat
+// it in the name ("ต้มจืดเต้าหู้ หมูสับ" + เนื้อสัตว์ "หมูสับ"). Strip the trailing
+// protein so both conventions group into one dish.
 function stripTrailingProtein(name, protein) {
   if (!protein || !name.endsWith(protein)) return name;
   const base = name.slice(0, -protein.length).trim();
@@ -86,7 +101,7 @@ function stripTrailingProtein(name, protein) {
 }
 
 // Stable, readable id derived from the dish identity rather than row position,
-// so an owner's `available` toggle survives rows being reordered in the sheet.
+// so an owner's `available` toggle survives rows being reordered.
 function idFor(heading, name) {
   let hash = 0;
   const key = `${heading}|${name}`;
@@ -96,7 +111,7 @@ function idFor(heading, name) {
   return `d${hash.toString(36)}`;
 }
 
-// Map cleaned Menu_Main rows onto menu items.
+// Map cleaned rows onto menu items.
 export function menuRowsToMenu(rows) {
   // Only real dishes. `รายการเสริม` rows are add-ons (ไข่ดาว, ท็อปปิ้ง, ขนาด,
   // ระดับความหวาน) and must not appear as cards in the menu.
@@ -109,7 +124,7 @@ export function menuRowsToMenu(rows) {
     const rawName = text(row[COL.name]);
     if (!rawName) continue; // ignore rows with no dish name
 
-    const protein = text(row[COL.protein]); // "" when the sheet says "-"
+    const protein = text(row[COL.protein]); // "" when the source says "-"
     const baseName = stripTrailingProtein(rawName, protein);
     const heading = text(row[COL.heading]);
     const key = `${heading}|${baseName}`;
@@ -140,8 +155,8 @@ export function menuRowsToMenu(rows) {
       ? Math.min(...options.map((o) => o.price)) // "starts at" price
       : toNumber(g.rows[0]?.price, 0);
     // With no choice to offer, the protein is part of the dish's identity —
-    // keep the sheet's original wording ("ผัดเผ็ดราดข้าว หมู") rather than the
-    // stripped base name.
+    // keep the original wording ("ผัดเผ็ดราดข้าว หมู") rather than the stripped
+    // base name.
     const name = options.length ? g.name : g.rows[0].rawName;
 
     return {
@@ -150,7 +165,7 @@ export function menuRowsToMenu(rows) {
       price,
       category: g.heading || 'อื่นๆ',
       group: g.group,
-      theme: 'day', // the sheet is the daytime menu
+      theme: 'day', // the database holds the daytime menu
       emoji: emojiFor(g.name),
       image: g.image,
       desc: '',
@@ -192,7 +207,7 @@ export function addonRowsToAddons(rows) {
 //   { name: 'ขนาด',           options: [ไซส์ M +0, ไซส์ L +5] }
 //   { name: 'ระดับความหวาน',  options: [100%, 50%, 25%, 0%, 120%] }
 //
-// Sheet order is preserved and the FIRST option of each group is the default,
+// Row order is preserved and the FIRST option of each group is the default,
 // which is why 100% (หวานปกติ) leading the sweetness rows matters.
 export function choiceRowsToChoices(rows) {
   const addonRows = rows.filter((r) => text(r[COL.kind]) === KIND_ADDON);
@@ -220,31 +235,4 @@ export function choiceRowsToChoices(rows) {
     out[key] = out[key].filter((g) => g.options.length >= 2);
   }
   return out;
-}
-
-// Fetch the spreadsheet and return the menu + extras built from Menu_Main.
-// Throws on network/permission/parse errors so the caller can fall back.
-export async function fetchMenuFromSheet() {
-  const sheets = await fetchSheets();
-
-  const rows = cleanRows(getTab(sheets, MENU_TAB));
-  if (!rows.length) {
-    const tabs = Object.keys(sheets).join(', ') || '(none)';
-    throw new Error(`Tab "${MENU_TAB}" is missing or empty. Tabs returned: ${tabs}`);
-  }
-
-  const menu = menuRowsToMenu(rows);
-  if (!menu.length) {
-    throw new Error(
-      `Tab "${MENU_TAB}" has ${rows.length} rows but produced no dishes — ` +
-      `check the "${COL.kind}"/"${COL.name}" columns still exist.`
-    );
-  }
-  // Extras are optional: a sheet with no รายการเสริม rows is valid, so these
-  // never throw.
-  return {
-    menu,
-    addons: addonRowsToAddons(rows),
-    choices: choiceRowsToChoices(rows),
-  };
 }

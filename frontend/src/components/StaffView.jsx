@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
 import { shiftNow, orderShift } from '../shift';
+import { generateInvoiceNo } from '../invoice';
+import { mergeOrder, itemRound } from '../orders';
 import {
   ClipboardList,
   LayoutGrid,
@@ -151,9 +153,16 @@ function StaffView({
 
   const payOrder = (order) => {
     if (confirm(`ยืนยันการเช็คบิล โต๊ะ ${order.table} ยอดรวม ฿${order.total.toLocaleString()} ใช่หรือไม่?`)) {
+      // On payment: stamp a bill number, mark paid and record the checkout time.
       // Kept in `orders` as paid history (OwnerView reports read it); the table
       // frees up on its own since getTableStatus ignores paid bills.
-      setOrders(prev => prev.map(o => (o.id === order.id ? { ...o, status: 'paid' } : o)));
+      const paidAt = Date.now();
+      setOrders(prev => prev.map(o => {
+        if (o.id !== order.id) return o;
+        // Count off `prev` so the running number reflects the latest state.
+        const invoiceNo = o.invoiceNo || generateInvoiceNo(o, prev);
+        return { ...o, invoiceNo, status: 'paid', paidAt };
+      }));
       clearTableWorkspace(order.table);
       showToast(`เช็คบิล โต๊ะ ${order.table} เรียบร้อยแล้ว`);
     }
@@ -225,15 +234,19 @@ function StaffView({
       selectedAddons.reduce((sum, a) => sum + a.price, 0) + choicesCost(selectedChoices);
     const chosenNames = Object.values(selectedChoices).map(o => o.name);
 
-    // When editing an existing bill, push straight into that bill
+    // When editing an existing bill, push straight into that bill. Tag the new
+    // item with the bill's current last round so it stays grouped with it
+    // rather than starting a stray divider.
     if (detailMode === 'editbill' && editingBill) {
+      const lastRound = editingBill.items.reduce((m, it) => Math.max(m, itemRound(it)), 1);
       const items = [...editingBill.items, {
         name: selectedItem.name,
         qty: modalQty,
         price: selectedItem.price,
         addonCost: addonCost,
         addOns: [...chosenNames, ...selectedAddons.map(a => a.name)],
-        note: modalNotes
+        note: modalNotes,
+        round: lastRound
       }];
       const total = items.reduce((sum, item) => sum + (item.price + (item.addonCost || 0)) * item.qty, 0);
       setEditingBill({ ...editingBill, items, total });
@@ -374,7 +387,9 @@ function StaffView({
       by: 'พนักงาน:' + (activeStaffUser || 'Staff')
     };
 
-    setOrders(prev => [...prev, newOrder]);
+    // Merge into the table's open bill (as a new round) if it hasn't checked
+    // out yet; otherwise this opens a fresh bill.
+    setOrders(prev => mergeOrder(prev, newOrder));
     setTakeOrderCart([]);
     showToast(`ลงบิล โต๊ะ ${targetTable} สำเร็จแล้ว ✓`);
     setSubTab('orders');
@@ -469,10 +484,27 @@ function StaffView({
     const grandTotal = activeBills.reduce((sum, o) => sum + (o.total || 0), 0);
     if (!confirm(`ยืนยันการเช็คบิล โต๊ะ ${table} ยอดรวม ฿${grandTotal.toLocaleString()} ใช่หรือไม่?`)) return;
 
+    // Settle each bill oldest-first so the running invoice numbers come out in
+    // chronological order.
+    const orderedIds = [...activeBills]
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+      .map(o => o.id);
+    const paidAt = Date.now();
+
     // Mark paid — kept in `orders` as history so OwnerView's Excel report still
-    // sees them (never removed).
-    const paidIds = new Set(activeBills.map(o => o.id));
-    setOrders(prev => prev.map(o => (paidIds.has(o.id) ? { ...o, status: 'paid' } : o)));
+    // sees them (never removed). Assign a SEPARATE invoice number to each bill,
+    // building the numbers up on a working copy so bill #2 counts bill #1 (etc.)
+    // and each gets a distinct, sequential number.
+    setOrders(prev => {
+      const working = [...prev];
+      for (const id of orderedIds) {
+        const idx = working.findIndex(o => o.id === id);
+        if (idx === -1) continue;
+        const invoiceNo = working[idx].invoiceNo || generateInvoiceNo(working[idx], working);
+        working[idx] = { ...working[idx], invoiceNo, status: 'paid', paidAt };
+      }
+      return working;
+    });
     // Free the table for the next group: drop any lingering workspace bound to it.
     clearTableWorkspace(table);
     showToast(`เช็คบิล โต๊ะ ${table} เรียบร้อยแล้ว โต๊ะพร้อมรับลูกค้าใหม่`);
@@ -571,22 +603,41 @@ function StaffView({
                       </span>
                     </div>
 
+                    {order.invoiceNo && (
+                      <div className="-mt-1 mb-2 text-[10px] font-mono font-bold text-amber-700">
+                        เลขที่บิล: {order.invoiceNo}
+                      </div>
+                    )}
+
                     <div className="space-y-1.5 py-1">
-                      {order.items.map((item, idx) => (
-                        <div key={idx} className="flex justify-between items-start text-xs font-thai text-neutral-800">
-                          <div>
-                            <span className="font-bold text-amber-700 mr-1.5">{item.qty}×</span>
-                            <span>{item.name}</span>
-                            {item.addOns && item.addOns.length > 0 && (
-                              <p className="text-[9px] text-neutral-400 pl-5">พิเศษ: {item.addOns.join(', ')}</p>
+                      {order.items.map((item, idx) => {
+                        // Divider between ordering rounds merged into this bill.
+                        const showRoundDivider = idx > 0 && itemRound(item) !== itemRound(order.items[idx - 1]);
+                        return (
+                          <React.Fragment key={idx}>
+                            {showRoundDivider && (
+                              <div className="flex items-center gap-2 pt-1 text-[9px] text-neutral-400 font-semibold">
+                                <span className="h-px flex-1 bg-neutral-200" />
+                                สั่งเพิ่ม · รอบที่ {itemRound(item)}
+                                <span className="h-px flex-1 bg-neutral-200" />
+                              </div>
                             )}
-                            {item.note && (
-                              <p className="text-[9px] text-red-500 italic pl-5">📝 {item.note}</p>
-                            )}
-                          </div>
-                          <span className="font-mono text-neutral-500 font-medium">฿{(item.price + (item.addonCost || 0)) * item.qty}</span>
-                        </div>
-                      ))}
+                            <div className="flex justify-between items-start text-xs font-thai text-neutral-800">
+                              <div>
+                                <span className="font-bold text-amber-700 mr-1.5">{item.qty}×</span>
+                                <span>{item.name}</span>
+                                {item.addOns && item.addOns.length > 0 && (
+                                  <p className="text-[9px] text-neutral-400 pl-5">พิเศษ: {item.addOns.join(', ')}</p>
+                                )}
+                                {item.note && (
+                                  <p className="text-[9px] text-red-500 italic pl-5">📝 {item.note}</p>
+                                )}
+                              </div>
+                              <span className="font-mono text-neutral-500 font-medium">฿{(item.price + (item.addonCost || 0)) * item.qty}</span>
+                            </div>
+                          </React.Fragment>
+                        );
+                      })}
                     </div>
 
                     <div className="border-t border-neutral-100 mt-2.5 pt-2 flex justify-between items-center text-xs">

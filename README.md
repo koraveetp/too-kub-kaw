@@ -19,28 +19,51 @@ Restaurant/
 │   └── vite.config.js        proxies "/api" → backend
 │
 └── backend/            ← BACKEND  (Node + Express, the shared server)
-    ├── server.js            REST API + real-time Server-Sent Events
-    ├── menu-sheet.js        pulls the live menu from the Google Sheet (CSV)
+    ├── server.js            REST API + real-time Server-Sent Events + auth
+    ├── menu-db.js           reads the live menu from PostgreSQL
+    ├── menu-transform.js    maps DB rows → the app's menu shape
+    ├── auth.js              password hashing + signed session tokens
     ├── seed.js              default menu/stock/staff/settings
     └── data.json            live saved state (auto-created, git-ignored)
 ```
 
-## Menu comes from a Google Sheet
+## Menu comes from PostgreSQL
 
-The menu is driven by a **published Google Sheet** (columns: `หมวดหมู่`,
-`ชื่อรายการ`, `ราคา (บาท)`). On startup the backend fetches that sheet's CSV
-(`backend/menu-sheet.js`) and adopts it as the menu, preserving any per-item
-"available" toggles staff/owner set locally. If the network is down it falls
-back to the baked-in copy in `seed.js`.
+The menu is driven by a **PostgreSQL** `menu_items` table (columns: `หมวดหมู่`,
+`ชื่อรายการ`, `ราคา (บาท)`, …). Create it with `menu_schema.sql` and import the
+CSV (see the comments in that file). On startup — and every
+`MENU_SYNC_INTERVAL_SECONDS` — the backend reads the table
+(`backend/menu-db.js`) and adopts it as the menu, preserving any per-item
+"available" toggles staff/owner set locally. If the DB is unreachable it keeps
+the last-known menu from `data.json`/`seed.js`.
 
-After editing the sheet, pull the changes without restarting:
+Set the connection string in `backend/.env` (copy `backend/.env.example`):
 
-```bash
-curl -X POST http://localhost:3001/api/menu/refresh
+```
+DATABASE_URL=postgres://USER:PASSWORD@localhost:5432/restaurant
 ```
 
-The refreshed menu is broadcast to every open tab in real time. To point at a
-different sheet, change `SHEET_CSV_URL` in `backend/menu-sheet.js`.
+After editing the table directly (e.g. in pgAdmin), pull the changes without
+restarting — this is a **staff-only** endpoint, so send your login token:
+
+```bash
+curl -X POST http://localhost:3001/api/menu/refresh -H "Authorization: Bearer <token>"
+```
+
+The refreshed menu is broadcast to every open tab in real time.
+
+## Security
+
+- **Passwords are hashed** (scrypt) — plaintext is never stored or sent to a
+  browser. `GET /api/state` strips staff credentials before responding.
+- **Login is server-side**: `POST /api/login` verifies the password and returns
+  a signed session token. The frontend sends it as a `Bearer` token.
+- **Management writes require that token**: `PUT /api/menu`, `/api/staff`, and
+  `/api/settings` reject unauthenticated requests. `orders` and `stock` stay
+  public because unauthenticated customers place orders (and that decrements
+  stock) — those payloads are validated and size-capped.
+- **CORS** is limited to `ALLOWED_ORIGINS` (defaults to the local dev ports).
+- Set a stable **`AUTH_SECRET`** in `backend/.env` so sessions survive restarts.
 
 - **Frontend** = everything the user sees. It renders the UI and, whenever
   something changes, sends it to the backend and listens for updates.
@@ -64,6 +87,9 @@ that tab's `localStorage` and are intentionally **not** shared.
 ```bash
 # first time only: install dependencies for root + backend + frontend
 npm run setup
+
+# configure the backend: copy the example env and fill in DATABASE_URL + AUTH_SECRET
+cp backend/.env.example backend/.env
 
 # start the backend and the frontend together
 npm run dev

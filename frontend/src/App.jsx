@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import CustomerView from './components/CustomerView';
 import StaffView from './components/StaffView';
 import OwnerView from './components/OwnerView';
-import { fetchState, saveResource, subscribeToState } from './api';
+import { fetchState, saveResource, subscribeToState, login, setAuthToken } from './api';
 import { User, ShieldCheck, Key, LogOut, Sun, Moon, Smartphone } from 'lucide-react';
 import logoImg from './assets/logo.jpg';
 
@@ -121,7 +121,8 @@ function App() {
       const next = typeof updater === 'function' ? updater(ref.current) : updater;
       ref.current = next;
       setLocal(next);
-      saveResource(resource, next);
+      // A 401 means our staff session expired — drop it and ask to log in again.
+      saveResource(resource, next, handleSessionExpired);
     };
   const setOrders = useCallback(makeSetter('orders', setOrdersLocal, ordersRef), []);
   const setMenu = useCallback(makeSetter('menu', setMenuLocal, menuRef), []);
@@ -214,29 +215,45 @@ function App() {
     }, 2800);
   };
 
-  const handleLogin = (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
-    const found = staff.find(s => s.user === loginUser && s.pass === loginPass);
-    if (found) {
-      setActiveStaffUser(loginUser);
+    try {
+      // The backend verifies the password against a hashed store and returns a
+      // signed session token; credentials are never checked in the browser.
+      const { token, user, name } = await login(loginUser, loginPass);
+      setActiveStaffUser(user);
+      // Persist the token so a refresh keeps the session. When "remember" is
+      // off we still need it in memory (setAuthToken already ran inside login()),
+      // just not on disk.
       if (loginRemember) {
-        localStorage.setItem('session', JSON.stringify({ user: loginUser }));
+        localStorage.setItem('session', JSON.stringify({ user, name, token }));
       }
       setRole('staff');
       setShowLoginModal(false);
       setLoginUser('');
       setLoginPass('');
-      showToast(`พนักงาน ${found.name} เข้าสู่ระบบสำเร็จ`);
-    } else {
-      alert('ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
+      showToast(`พนักงาน ${name} เข้าสู่ระบบสำเร็จ`);
+    } catch (err) {
+      alert(err.message || 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
     }
   };
 
   const handleLogout = () => {
     setActiveStaffUser(null);
+    setAuthToken(null);
     localStorage.removeItem('session');
     setRole('customer');
     showToast('ออกจากระบบพนักงานแล้ว');
+  };
+
+  // Called when the backend rejects a protected write because our session token
+  // is missing or expired. Clear the stale session and prompt a fresh login.
+  const handleSessionExpired = () => {
+    setActiveStaffUser(null);
+    setAuthToken(null);
+    localStorage.removeItem('session');
+    showToast('เซสชันหมดอายุ กรุณาเข้าสู่ระบบอีกครั้ง');
+    setShowLoginModal(true);
   };
 
   const switchRole = (newRole, newTheme = 'day', table = 1) => {

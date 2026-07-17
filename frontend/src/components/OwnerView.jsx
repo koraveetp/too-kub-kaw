@@ -89,6 +89,7 @@ function OwnerView({
     }
 
     const wsData = orders.map(o => ({
+      'เลขที่บิล': o.invoiceNo || '-',
       'รหัสบิล': o.id,
       'หมายเลขโต๊ะ': o.table,
       'เวลาสั่งซื้อ': o.time,
@@ -345,6 +346,9 @@ function OwnerView({
                       <div>
                         <span className="font-mono font-bold text-neutral-800">{o.no}</span>
                         <span className="text-neutral-400 text-[10px] ml-1.5">โต๊ะ {o.table} &bull; {o.time}</span>
+                        {o.invoiceNo && (
+                          <span className="block font-mono text-amber-700 text-[10px] font-semibold">เลขที่บิล: {o.invoiceNo}</span>
+                        )}
                       </div>
                       <div className="text-right">
                         <span className="font-mono font-extrabold text-neutral-800 block">฿{o.total.toLocaleString()}</span>
@@ -501,7 +505,7 @@ function OwnerView({
                   <div key={s.user} className="py-2.5 flex justify-between items-center text-xs">
                     <div>
                       <span className="font-bold text-neutral-800 block">{s.name}</span>
-                      <span className="text-neutral-400 font-mono text-[10px]">ชื่อผู้ใช้: {s.user} &bull; รหัสผ่าน: {s.pass}</span>
+                      <span className="text-neutral-400 font-mono text-[10px]">ชื่อผู้ใช้: {s.user} &bull; รหัสผ่าน: ••••••</span>
                     </div>
                     <button
                       onClick={() => handleDeleteStaffAccount(s.user)}
