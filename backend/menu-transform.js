@@ -100,11 +100,21 @@ function stripTrailingProtein(name, protein) {
   return base || name; // a dish named only after its protein keeps its name
 }
 
+// Which menu a row belongs to. The database's `theme` column decides; rows from
+// a source that has no such column (or an un-migrated table) are daytime.
+function rowTheme(row) {
+  return text(row?.theme) === 'night' ? 'night' : 'day';
+}
+
 // Stable, readable id derived from the dish identity rather than row position,
 // so an owner's `available` toggle survives rows being reordered.
-function idFor(heading, name) {
+//
+// `theme` is part of the key because the two menus genuinely share dish names:
+// ข้าวผัด appears under อาหารจานเดียว in both, at 50฿ by day and 70฿ by night.
+// Without it they would collapse onto one id and overwrite each other.
+function idFor(theme, heading, name) {
   let hash = 0;
-  const key = `${heading}|${name}`;
+  const key = `${theme}|${heading}|${name}`;
   for (let i = 0; i < key.length; i++) {
     hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
   }
@@ -127,12 +137,16 @@ export function menuRowsToMenu(rows) {
     const protein = text(row[COL.protein]); // "" when the source says "-"
     const baseName = stripTrailingProtein(rawName, protein);
     const heading = text(row[COL.heading]);
-    const key = `${heading}|${baseName}`;
+    const theme = rowTheme(row);
+    // Theme leads the key so the day and night versions of a shared dish name
+    // stay two separate menu cards.
+    const key = `${theme}|${heading}|${baseName}`;
     let g = byKey.get(key);
     if (!g) {
       g = {
         name: baseName,
         heading,
+        theme,
         group: text(row[COL.group]) === DRINK_GROUP ? 'drink' : 'food',
         image: text(row[COL.image]),
         rows: [],
@@ -160,12 +174,12 @@ export function menuRowsToMenu(rows) {
     const name = options.length ? g.name : g.rows[0].rawName;
 
     return {
-      id: idFor(g.heading, name),
+      id: idFor(g.theme, g.heading, name),
       name,
       price,
       category: g.heading || 'อื่นๆ',
       group: g.group,
-      theme: 'day', // the database holds the daytime menu
+      theme: g.theme, // from the `theme` column: 'day' or 'night'
       emoji: emojiFor(g.name),
       image: g.image,
       desc: '',
@@ -184,20 +198,26 @@ export function menuRowsToMenu(rows) {
 // Rows whose หัวข้อ is a CHOICE_HEADING are handled by choiceRowsToChoices()
 // instead: as tick-boxes they would let a customer order both ไซส์ M and
 // ไซส์ L, or two sweetness levels at once.
+// The night bar keeps ONE list of its own (addons.night) rather than the
+// food/drink split — see addonsFor() in frontend/src/menu-groups.js. Night rows
+// therefore bypass the storefront buckets entirely.
 export function addonRowsToAddons(rows) {
   const addonRows = rows.filter((r) => text(r[COL.kind]) === KIND_ADDON);
-  const out = { food: [], drink: [] };
+  const out = { food: [], drink: [], night: [] };
 
   for (const row of addonRows) {
     const name = text(row[COL.name]);
     if (!name) continue;
     if (CHOICE_HEADINGS.includes(text(row[COL.heading]))) continue;
 
-    const bucket = text(row[COL.group]) === DRINK_GROUP ? out.drink : out.food;
+    const theme = rowTheme(row);
+    const bucket = theme === 'night'
+      ? out.night
+      : (text(row[COL.group]) === DRINK_GROUP ? out.drink : out.food);
     // สั่งกลับบ้าน is listed under both อาหาร and เพิ่มเติม — keep it once.
     if (bucket.some((a) => a.name === name)) continue;
 
-    bucket.push({ id: idFor('addon', name), name, price: toNumber(row[COL.price], 0) });
+    bucket.push({ id: idFor(theme, 'addon', name), name, price: toNumber(row[COL.price], 0) });
   }
   return out;
 }
@@ -209,11 +229,14 @@ export function addonRowsToAddons(rows) {
 //
 // Row order is preserved and the FIRST option of each group is the default,
 // which is why 100% (หวานปกติ) leading the sweetness rows matters.
+// Night rows are skipped: choicesFor() returns nothing for the night menu, so a
+// ขนาด/ระดับความหวาน group there would be built and never shown.
 export function choiceRowsToChoices(rows) {
   const addonRows = rows.filter((r) => text(r[COL.kind]) === KIND_ADDON);
   const out = { food: [], drink: [] };
 
   for (const row of addonRows) {
+    if (rowTheme(row) === 'night') continue;
     const heading = text(row[COL.heading]);
     if (!CHOICE_HEADINGS.includes(heading)) continue;
     const name = text(row[COL.name]);
@@ -222,7 +245,7 @@ export function choiceRowsToChoices(rows) {
     const bucket = text(row[COL.group]) === DRINK_GROUP ? out.drink : out.food;
     let group = bucket.find((g) => g.name === heading);
     if (!group) {
-      group = { id: idFor('choice', heading), name: heading, options: [] };
+      group = { id: idFor('day', 'choice', heading), name: heading, options: [] };
       bucket.push(group);
     }
     if (group.options.some((o) => o.name === name)) continue;

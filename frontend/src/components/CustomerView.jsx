@@ -3,20 +3,25 @@ import { ShoppingBag, ShoppingBasket, Trash2, X, Plus, Minus, CheckCircle } from
 import { isDrinkItem, addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
 import { mergeOrder, itemRound } from '../orders';
 import { shiftNow } from '../shift';
-import foodImg from '../assets/food.jpg';
-import beverageImg from '../assets/beverage.jpg';
+import foodDayImg from '../assets/food.jpg';
+import foodNightImg from '../assets/food-night.png';
+import beverageDayImg from '../assets/beverage.jpg';
+import beverageNightImg from '../assets/beverage-night.jpg';
 
+// Each storefront card carries one photo per theme: the daytime kitchen
+// shoots bright, the bar shoots dark, so a single image for both would
+// always look wrong in one of them.
 const GROUPS = [
   {
     key: 'food',
     label: 'เมนูอาหาร',
-    image: foodImg,
+    image: { day: foodDayImg, night: foodNightImg },
     fallback: 'from-[#A9713D] to-[#6B4021]',
   },
   {
     key: 'drink',
     label: 'เครื่องดื่ม',
-    image: beverageImg,
+    image: { day: beverageDayImg, night: beverageNightImg },
     fallback: 'from-[#C99A5B] to-[#8A5A32]',
   },
 ];
@@ -259,11 +264,11 @@ function CustomerView({
       {/* CUSTOM STATUS VIEW TOGGLE */}
       {showStatusList ? (
         <div className="space-y-4">
-          <div className="flex justify-between items-center bg-[#F7F3EB]/40 dark:bg-neutral-900/20 p-2 rounded-xl">
+          <div className="flex justify-between items-center p-2 rounded-xl bg-strip-soft">
             <h2 className="font-extrabold text-base font-kanit">สถานะสั่งซื้อ โต๊ะ {tableNo}</h2>
             <button
               onClick={() => setShowStatusList(false)}
-              className={`text-xs px-3 py-1.5 font-bold rounded-lg border transition-all ${isDay ? 'bg-white hover:bg-neutral-50 border-neutral-200 text-[#4A3E3D]' : 'bg-neutral-900 hover:bg-neutral-800 border-neutral-800 text-[#E8D5C4]'}`}
+              className="text-xs px-3 py-1.5 font-bold rounded-lg border transition-all bg-raised hover:bg-raised-hover border-line-strong text-ink"
             >
               ← กลับไปสั่งอาหาร
             </button>
@@ -274,14 +279,15 @@ function CustomerView({
               tableOrders.map(order => (
                 <div
                   key={order.id}
-                  className={`border rounded-2xl p-4 shadow-sm relative overflow-hidden transition ${isDay ? 'bg-white border-orange-100/70' : 'bg-[#251A10]/60 border-orange-950/40'}`}
+                  className="border rounded-2xl p-4 shadow-sm relative overflow-hidden transition bg-card border-line"
                 >
-                  {/* Decorative Ticket Cuts */}
-                  <div className={`absolute top-12 -left-2 w-4 h-4 rounded-full border-r ${isDay ? 'bg-[#FDFBF7] border-orange-100' : 'bg-[#1A120B] border-orange-950'}`} />
-                  <div className={`absolute top-12 -right-2 w-4 h-4 rounded-full border-l ${isDay ? 'bg-[#FDFBF7] border-orange-100' : 'bg-[#1A120B] border-orange-950'}`} />
+                  {/* Decorative Ticket Cuts — filled with the page colour so
+                      they read as bites taken out of the ticket. */}
+                  <div className="absolute top-12 -left-2 w-4 h-4 rounded-full border-r bg-app border-line" />
+                  <div className="absolute top-12 -right-2 w-4 h-4 rounded-full border-l bg-app border-line" />
 
-                  <div className="flex justify-between items-center border-b pb-2 mb-2 border-dashed border-neutral-200/80">
-                    <span className="font-mono font-bold text-neutral-500 text-xs">{order.no}</span>
+                  <div className="flex justify-between items-center border-b pb-2 mb-2 border-dashed border-line-strong">
+                    <span className="font-mono font-bold text-xs text-ink-2">{order.no}</span>
                     <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${getStatusColor(order.status)}`}>
                       {getStatusLabel(order.status)}
                     </span>
@@ -296,46 +302,46 @@ function CustomerView({
                       return (
                         <React.Fragment key={idx}>
                           {showRoundDivider && (
-                            <div className="flex items-center gap-2 pt-1.5 text-[9px] text-neutral-400 font-semibold">
-                              <span className="h-px flex-1 bg-neutral-200 dark:bg-orange-950/50" />
+                            <div className="flex items-center gap-2 pt-1.5 text-[9px] text-neutral-400 dark:text-[#9B8875] font-semibold">
+                              <span className="h-px flex-1 bg-neutral-200 dark:bg-[#4A3A2C]" />
                               สั่งเพิ่ม · รอบที่ {itemRound(item)}
-                              <span className="h-px flex-1 bg-neutral-200 dark:bg-orange-950/50" />
+                              <span className="h-px flex-1 bg-neutral-200 dark:bg-[#4A3A2C]" />
                             </div>
                           )}
                           <div className="flex justify-between items-start text-xs">
                             <div>
-                              <span className="font-extrabold text-amber-700 dark:text-[#D4A373] mr-1.5">{item.qty}×</span>
+                              <span className="font-extrabold text-amber-700 dark:text-[#E8B45C] mr-1.5">{item.qty}×</span>
                               <span className="font-semibold">{item.name}</span>
                               {item.addOns && item.addOns.length > 0 && (
-                                <p className="text-[9px] text-neutral-400 pl-5 font-medium">ตัวเลือก: {item.addOns.join(', ')}</p>
+                                <p className="text-[9px] text-neutral-400 dark:text-[#9B8875] pl-5 font-medium">ตัวเลือก: {item.addOns.join(', ')}</p>
                               )}
                               {item.note && (
-                                <p className="text-[9px] text-orange-900/60 dark:text-[#D4A373]/60 pl-5 italic font-medium">📝 "{item.note}"</p>
+                                <p className="text-[9px] text-orange-900/60 dark:text-[#C9B8A6] pl-5 italic font-medium">📝 "{item.note}"</p>
                               )}
                             </div>
-                            <span className="font-mono text-neutral-500">฿{((item.price + (item.addonCost || 0)) * item.qty).toLocaleString()}</span>
+                            <span className="font-mono text-neutral-500 dark:text-[#C9B8A6]">฿{((item.price + (item.addonCost || 0)) * item.qty).toLocaleString()}</span>
                           </div>
                         </React.Fragment>
                       );
                     })}
                   </div>
 
-                  <div className="border-t border-dashed border-neutral-200/80 mt-3 pt-2.5 flex justify-between items-center text-xs">
-                    <span className="text-[10px] text-neutral-400 font-medium">สั่งเมื่อ {order.time} น.</span>
+                  <div className="border-t border-dashed border-neutral-200/80 dark:border-[#4A3A2C] mt-3 pt-2.5 flex justify-between items-center text-xs">
+                    <span className="text-[10px] text-neutral-400 dark:text-[#9B8875] font-medium">สั่งเมื่อ {order.time} น.</span>
                     <div>
-                      <span className="text-neutral-400 text-[10px] mr-1 font-medium">รวมทั้งสิ้น</span>
-                      <span className="font-mono font-extrabold text-sm text-amber-700 dark:text-[#D4A373]">฿{order.total.toLocaleString()}</span>
+                      <span className="text-neutral-400 dark:text-[#9B8875] text-[10px] mr-1 font-medium">รวมทั้งสิ้น</span>
+                      <span className="font-mono font-extrabold text-sm text-amber-700 dark:text-[#E8B45C]">฿{order.total.toLocaleString()}</span>
                     </div>
                   </div>
                 </div>
               ))
             ) : (
-              <div className="text-center py-10 space-y-2 border border-dashed rounded-2xl border-neutral-200">
+              <div className="text-center py-10 space-y-2 border border-dashed rounded-2xl border-neutral-200 dark:border-[#4A3A2C]">
                 <span className="text-3xl">🧾</span>
-                <p className="text-neutral-400 font-medium text-xs">โต๊ะนี้ยังไม่มีข้อมูลออเดอร์ในวันนี้</p>
+                <p className="text-neutral-400 dark:text-[#9B8875] font-medium text-xs">โต๊ะนี้ยังไม่มีข้อมูลออเดอร์ในวันนี้</p>
                 <button
                   onClick={() => setShowStatusList(false)}
-                  className="text-xs text-amber-600 font-bold underline mt-1 block"
+                  className="text-xs text-amber-600 dark:text-[#E8B45C] font-bold underline mt-1 block"
                 >
                   สั่งอาหารมื้ออร่อยของคุณเลย →
                 </button>
@@ -360,7 +366,7 @@ function CustomerView({
                 }`}
               >
                 <img
-                  src={group.image}
+                  src={group.image[theme] || group.image.day}
                   alt=""
                   loading="lazy"
                   className="absolute inset-0 w-full h-full object-cover"
@@ -378,7 +384,7 @@ function CustomerView({
           {sections.length > 0 ? (
             sections.map(section => (
               <div key={section.category} className="space-y-3">
-                <h2 className={`font-kanit text-xl font-semibold ${isDay ? 'text-[#6B4A32]' : 'text-[#E8D5C4]'}`}>
+                <h2 className="font-kanit text-xl font-semibold text-heading">
                   {section.category}
                 </h2>
 
@@ -386,23 +392,23 @@ function CustomerView({
                   <div
                     key={dish.id}
                     onClick={() => handleOpenDetail(dish)}
-                    className={`rounded-3xl p-3.5 flex items-center gap-3.5 transition duration-300 ${dish.available ? 'cursor-pointer active:scale-[0.99]' : 'opacity-55'} ${isDay ? 'bg-white shadow-[0_6px_20px_-8px_rgba(90,46,20,0.28)] hover:shadow-[0_10px_26px_-8px_rgba(90,46,20,0.35)]' : 'bg-[#251A10] border border-orange-950/40 hover:bg-[#2e2115]'}`}
+                    className={`rounded-3xl p-3.5 flex items-center gap-3.5 transition duration-300 bg-card hover:bg-card-hover ${dish.available ? 'cursor-pointer active:scale-[0.99]' : 'opacity-55'} ${isDay ? 'shadow-[0_6px_20px_-8px_rgba(90,46,20,0.28)] hover:shadow-[0_10px_26px_-8px_rgba(90,46,20,0.35)]' : 'border border-line shadow-[0_6px_20px_-10px_rgba(0,0,0,0.8)]'}`}
                   >
-                    <div className={`w-[88px] h-[88px] rounded-2xl flex-shrink-0 flex items-center justify-center text-4xl overflow-hidden ${isDay ? 'bg-gradient-to-b from-[#DCEBF7] to-[#CDE3B8]' : 'bg-[#140E09] border border-orange-950'}`}>
+                    <div className={`w-[88px] h-[88px] rounded-2xl flex-shrink-0 flex items-center justify-center text-4xl overflow-hidden ${isDay ? 'bg-gradient-to-b from-well to-well-2' : 'bg-well border border-line'}`}>
                       {dish.image
                         ? <img src={dish.image} alt="" loading="lazy" className="w-full h-full object-cover" />
                         : <span>{dish.emoji || '🍽️'}</span>}
                     </div>
 
                     <div className="flex-1 min-w-0">
-                      <h4 className={`font-kanit font-bold text-[17px] leading-snug truncate ${isDay ? 'text-[#5A2E14]' : 'text-stone-100'}`}>
+                      <h4 className="font-kanit font-bold text-[17px] leading-snug truncate text-title">
                         {dish.name}
                       </h4>
                       {subtitleOf(dish) && (
-                        <p className="text-sm text-neutral-500 truncate mt-0.5">{subtitleOf(dish)}</p>
+                        <p className="text-sm truncate mt-0.5 text-ink-2">{subtitleOf(dish)}</p>
                       )}
                       <div className="mt-2 flex items-center gap-2">
-                        <span className={`font-kanit font-bold text-lg ${isDay ? 'text-[#7B2D12]' : 'text-[#D4A373]'}`}>
+                        <span className="font-kanit font-bold text-lg text-accent">
                           {dish.price}.-
                         </span>
                         {!dish.available && (
@@ -414,7 +420,7 @@ function CustomerView({
                     </div>
 
                     {dish.available && (
-                      <span className={`w-14 h-14 rounded-full flex-shrink-0 flex items-center justify-center text-white shadow-md transition ${isDay ? 'bg-[#A9713D] hover:bg-[#8A5A32]' : 'bg-[#C2593F] hover:bg-[#a1452e]'}`}>
+                      <span className="w-14 h-14 rounded-full flex-shrink-0 flex items-center justify-center shadow-md transition bg-add hover:bg-add-hover text-add-ink">
                         <ShoppingBasket className="w-6 h-6" />
                       </span>
                     )}
@@ -423,14 +429,14 @@ function CustomerView({
               </div>
             ))
           ) : (
-            <div className="text-center py-10 text-neutral-400 text-xs font-medium">ยังไม่มีรายการเมนูในหมวดนี้</div>
+            <div className="text-center py-10 text-xs font-medium text-ink-3">ยังไม่มีรายการเมนูในหมวดนี้</div>
           )}
 
           {/* VIEW STATUS SHORTCUT BUTTON */}
           <div className="text-center pt-4">
             <button
               onClick={() => setShowStatusList(true)}
-              className="text-xs text-amber-600 font-extrabold hover:underline"
+              className="text-xs font-extrabold hover:underline text-link"
             >
               ตรวจสอบประวัติการสั่งและสถานะออเดอร์ของโต๊ะนี้ →
             </button>
@@ -444,11 +450,11 @@ function CustomerView({
         <div className="fixed bottom-14 left-0 right-0 max-w-md mx-auto px-4 py-2 z-30 pointer-events-none">
           <button
             onClick={() => setShowCartModal(true)}
-            className={`w-full text-white font-bold rounded-2xl p-3 flex items-center justify-between gap-3 shadow-2xl pointer-events-auto transition hover:scale-[1.02] active:scale-[0.98] ${isDay ? 'bg-[#A25B34] hover:bg-[#8d4f2c]' : 'bg-[#C2593F] hover:bg-[#aa4e37]'}`}
+            className="w-full font-bold rounded-2xl p-3 flex items-center justify-between gap-3 shadow-2xl pointer-events-auto transition hover:scale-[1.02] active:scale-[0.98] bg-cta hover:bg-cta-hover text-cta-ink"
           >
             <div className="flex items-center gap-2">
               <div className="relative">
-                <span className="bg-white/20 p-1.5 rounded-lg block">
+                <span className={`p-1.5 rounded-lg block ${isDay ? 'bg-white/20' : 'bg-black/15'}`}>
                   <ShoppingBag className="w-4 h-4" />
                 </span>
                 <span className="absolute -top-1.5 -right-1.5 bg-red-500 text-white text-[9px] w-4.5 h-4.5 rounded-full flex items-center justify-center font-bold font-mono">

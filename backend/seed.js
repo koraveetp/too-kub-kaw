@@ -112,7 +112,11 @@ export const SEED = {
   ],
   settings: {
     name: 'ตู้กับข้าวบ้านยาย',
+    nameNight: 'เรือนเก่า',
     tables: 12,
     baseUrl: ''
-  }
+  },
+  // Owner-recorded outgoings (rent, ingredients, wages...). Each entry is
+  // { id, date: 'YYYY-MM-DD', shop: 'day'|'night', category, amount, note, createdAt }.
+  expenses: []
 };

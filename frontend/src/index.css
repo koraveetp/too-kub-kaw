@@ -8,6 +8,106 @@
   }
 }
 
+/* ============================================================
+   จานสีของแอป — แก้สีทุกอย่างได้ที่นี่ที่เดียว
+
+   วิธีใช้: เปลี่ยนเลข hex ข้างล่าง กด save แล้วดูที่เบราว์เซอร์ได้เลย
+   ทุกหน้าเปลี่ยนตามทันที ไม่ต้องแก้ไฟล์อื่นและไม่ต้อง restart
+
+   แต่ละธีมเริ่มด้วยกลุ่ม "6 สีหลัก" ซึ่งเป็นสีที่เห็นชัดที่สุด
+   อยากลองเปลี่ยนอารมณ์ทั้งแอปเร็วๆ แก้แค่ 6 บรรทัดนั้นพอ
+   ที่เหลือด้านล่างเป็นรายละเอียดปลีกย่อย ค่อยๆ ไล่ปรับทีหลังได้
+
+   ข้อควรระวัง: ใส่เป็น hex ล้วนเท่านั้น (เช่น #14100C)
+   ห้ามใส่ rgba() หรือสีโปร่งแสง เพราะ Tailwind อ่านค่าพวกนี้ไปใช้ต่อ
+
+   (สำหรับคนแก้โค้ด: ชื่อตัวแปรผูกกับคลาส Tailwind ใน tailwind.config.js
+    --c-card คือ bg-card, --c-ink คือ text-ink, --c-line คือ border-line)
+   ============================================================ */
+
+/* ---------- ธีมกลางวัน ---------- */
+.theme-day {
+  /* ===== 6 สีหลัก — แก้แค่กลุ่มนี้ก็เปลี่ยนอารมณ์ทั้งแอปแล้ว ===== */
+  --c-app: #FFF7F0;          /* พื้นหลังแอป */
+  --c-strip: #F7F3EB;        /* แถบหัว + แถบล่าง */
+  --c-card: #FFFFFF;         /* การ์ดเมนู */
+  --c-ink: #4A3E3D;          /* ตัวอักษรหลัก */
+  --c-accent: #7B2D12;       /* ราคา */
+  --c-cta: #A25B34;          /* ปุ่มตะกร้าใหญ่ด้านล่าง */
+
+  /* ===== ตัวอักษร ===== */
+  --c-ink-2: #737373;        /* คำอธิบายใต้ชื่อเมนู */
+  --c-ink-3: #A3A3A3;        /* ตัวอักษรจางๆ เช่น footer */
+  --c-title: #5A2E14;        /* ชื่อเมนู */
+  --c-heading: #6B4A32;      /* หัวข้อหมวดหมู่ */
+  --c-link: #D97706;         /* ลิงก์กดได้ */
+  --c-header-ink: #FFFFFF;   /* ตัวอักษรบนแถบหัว (กลางวันอยู่บนลายไม้) */
+
+  /* ===== พื้นผิวย่อย ===== */
+  --c-card-hover: #FAFAFA;   /* การ์ดเมนูตอนเอาเมาส์ชี้ */
+  --c-strip-soft: #FCF5EE;   /* แถบสถานะออเดอร์ (จางกว่า --c-strip) */
+  --c-raised: #FFFFFF;       /* ปุ่มเล็กบนแถบหัว */
+  --c-raised-hover: #FAFAFA;
+  --c-raised-ink: #6B4021;   /* ตัวอักษร/ไอคอนในปุ่มเล็ก */
+  --c-logo: #FBEAD3;         /* กรอบโลโก้บนแถบหัว */
+  --c-well: #DCEBF7;         /* กรอบรูปอาหาร (กลางวันไล่สีไป --c-well-2) */
+  --c-well-2: #CDE3B8;
+
+  /* ===== เส้นขอบ ===== */
+  --c-line: #FFEDD5;         /* เส้นขอบทั่วไป */
+  --c-line-strong: #E5E5E5;  /* เส้นขอบที่เข้มกว่า */
+
+  /* ===== ปุ่ม ===== */
+  --c-cta-hover: #8D4F2C;    /* ปุ่มตะกร้าตอนชี้ */
+  --c-cta-ink: #FFFFFF;      /* ตัวอักษรในปุ่มตะกร้า */
+  --c-add: #A9713D;          /* ปุ่มกลม + ท้ายรายการอาหาร */
+  --c-add-hover: #8A5A32;
+  --c-add-ink: #FFFFFF;
+}
+
+/* ---------- ธีมกลางคืน ----------
+   สีพื้นผิวไล่สว่างขึ้นทีละขั้นตามลำดับความใกล้ตา (พื้นแอป → การ์ด → ปุ่ม)
+   การ์ดเลยดูลอยขึ้นมาได้โดยไม่ต้องใช้เส้นขอบสว่าง ถ้าเปลี่ยนสีเอง
+   แนะนำให้รักษาลำดับนี้ไว้ ไม่งั้นการ์ดจะจมหายไปกับพื้นหลัง */
+.theme-night {
+  /* ===== 6 สีหลัก — แก้แค่กลุ่มนี้ก็เปลี่ยนอารมณ์ทั้งแอปแล้ว ===== */
+  --c-app: #301c03;          /* พื้นหลังแอป (ค่าตั้งต้นคือ #14100C) */
+  --c-strip: #1B1510;        /* แถบหัว + แถบล่าง */
+  --c-card: #241D16;         /* การ์ดเมนู */
+  --c-ink: #F6EEE4;          /* ตัวอักษรหลัก */
+  --c-accent: #E8B45C;       /* ราคา */
+  --c-cta: #E5A63F;          /* ปุ่มตะกร้าใหญ่ด้านล่าง */
+
+  /* ===== ตัวอักษร ===== */
+  --c-ink-2: #C9B8A6;        /* คำอธิบายใต้ชื่อเมนู */
+  --c-ink-3: #9B8875;        /* ตัวอักษรจางๆ เช่น footer */
+  --c-title: #F6EEE4;        /* ชื่อเมนู */
+  --c-heading: #E8B45C;      /* หัวข้อหมวดหมู่ */
+  --c-link: #E8B45C;         /* ลิงก์กดได้ */
+  --c-header-ink: #F6EEE4;   /* ตัวอักษรบนแถบหัว */
+
+  /* ===== พื้นผิวย่อย ===== */
+  --c-card-hover: #2E251C;   /* การ์ดเมนูตอนเอาเมาส์ชี้ */
+  --c-strip-soft: #1B1510;   /* แถบสถานะออเดอร์ */
+  --c-raised: #2E251C;       /* ปุ่มเล็กบนแถบหัว */
+  --c-raised-hover: #3B2E23;
+  --c-raised-ink: #E8B45C;   /* ตัวอักษร/ไอคอนในปุ่มเล็ก */
+  --c-logo: #2E251C;         /* กรอบโลโก้บนแถบหัว */
+  --c-well: #171209;         /* กรอบรูปอาหาร */
+  --c-well-2: #171209;
+
+  /* ===== เส้นขอบ ===== */
+  --c-line: #3B2E23;         /* เส้นขอบทั่วไป */
+  --c-line-strong: #4A3A2C;  /* เส้นขอบที่เข้มกว่า */
+
+  /* ===== ปุ่ม ===== */
+  --c-cta-hover: #D2932C;    /* ปุ่มตะกร้าตอนชี้ */
+  --c-cta-ink: #1A120B;      /* ตัวอักษรในปุ่มตะกร้า */
+  --c-add: #E5A63F;          /* ปุ่มกลม + ท้ายรายการอาหาร */
+  --c-add-hover: #D2932C;
+  --c-add-ink: #1A120B;
+}
+
 /* Cozy Day Theme */
 .theme-day {
   background-color: #FDFBF7;
@@ -20,7 +120,7 @@
 
 /* Storefront surface: warm cream fading to peach, behind the day menu. */
 .surface-cozy {
-  background-color: #FFF7F0;
+  background-color: var(--c-app);
   background-image: linear-gradient(175deg, #FFFDFB 0%, #FFF4EA 45%, #FBE7D8 100%);
 }
 
@@ -43,11 +143,13 @@
     linear-gradient(90deg, #7A4B27 0%, #9A6739 30%, #83552F 62%, #A06D3F 100%);
 }
 
-/* Retro Night Theme */
+/* The page behind the app shell. Only the margins either side of the
+   max-w-md column show it, so it tracks --c-app rather than setting a
+   colour of its own. */
 .theme-night {
-  background-color: #1A120B;
-  color: #E8D5C4;
-  background-image: 
+  background-color: var(--c-app);
+  color: var(--c-ink);
+  background-image:
       linear-gradient(90deg, rgba(232, 213, 196, 0.01) 1px, transparent 1px),
       linear-gradient(90deg, rgba(232, 213, 196, 0.005) 12px, transparent 12px);
   background-size: 30px 100%, 70px 100%;
@@ -64,6 +166,13 @@
 ::-webkit-scrollbar-thumb {
   background: rgba(0,0,0,0.25);
   border-radius: 4px;
+}
+/* A black thumb on a near-black page is invisible; flip it for the night theme. */
+.theme-night ::-webkit-scrollbar-track {
+  background: rgba(255,255,255,0.04);
+}
+.theme-night ::-webkit-scrollbar-thumb {
+  background: rgba(246,238,228,0.22);
 }
 
 @keyframes slideup {

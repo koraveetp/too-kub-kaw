@@ -76,6 +76,7 @@ const DEFAULT_STAFF = [
 
 const DEFAULT_SETTINGS = {
   name: 'ตู้กับข้าวบ้านยาย',
+  nameNight: 'เรือนเก่า',
   tables: 12,
   baseUrl: ''
 };
@@ -93,6 +94,8 @@ function App() {
   const [staff, setStaffLocal] = useState(DEFAULT_STAFF);
   const [settings, setSettingsLocal] = useState(DEFAULT_SETTINGS);
   const [orders, setOrdersLocal] = useState([]);
+  // Owner-recorded outgoings. Empty until the backend answers.
+  const [expenses, setExpensesLocal] = useState([]);
   // Extras come from the sheet via the backend; fall back to the local
   // defaults for anything it doesn't carry (i.e. the night bar).
   const [addons, setAddonsLocal] = useState(DEFAULT_ADDONS);
@@ -102,12 +105,12 @@ function App() {
   // setters below can compute functional updates (prev => next) without going
   // stale, even right after an SSE push.
   const ordersRef = useRef(orders);
-  const menuRef = useRef(menu);
   const stockRef = useRef(stock);
   const staffRef = useRef(staff);
   const settingsRef = useRef(settings);
+  const expensesRef = useRef(expenses);
+  useEffect(() => { expensesRef.current = expenses; }, [expenses]);
   useEffect(() => { ordersRef.current = orders; }, [orders]);
-  useEffect(() => { menuRef.current = menu; }, [menu]);
   useEffect(() => { stockRef.current = stock; }, [stock]);
   useEffect(() => { staffRef.current = staff; }, [staff]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
@@ -125,10 +128,10 @@ function App() {
       saveResource(resource, next, handleSessionExpired);
     };
   const setOrders = useCallback(makeSetter('orders', setOrdersLocal, ordersRef), []);
-  const setMenu = useCallback(makeSetter('menu', setMenuLocal, menuRef), []);
   const setStock = useCallback(makeSetter('stock', setStockLocal, stockRef), []);
   const setStaff = useCallback(makeSetter('staff', setStaffLocal, staffRef), []);
   const setSettings = useCallback(makeSetter('settings', setSettingsLocal, settingsRef), []);
+  const setExpenses = useCallback(makeSetter('expenses', setExpensesLocal, expensesRef), []);
   
   // App UX States
   const [cart, setCart] = useState([]);
@@ -171,7 +174,8 @@ function App() {
       if (s.menu) setMenuLocal(s.menu);
       if (s.stock) setStockLocal(s.stock);
       if (s.staff) setStaffLocal(s.staff);
-      if (s.settings) setSettingsLocal(s.settings);
+      if (s.settings) setSettingsLocal({ ...DEFAULT_SETTINGS, ...s.settings });
+      if (s.expenses) setExpensesLocal(s.expenses);
       if (s.addons) setAddonsLocal({ ...DEFAULT_ADDONS, ...s.addons });
       if (s.choices) setChoicesLocal({ ...DEFAULT_CHOICES, ...s.choices });
     };
@@ -280,12 +284,12 @@ function App() {
       </div>
 
       {/* CORE MOBILE SHELL */}
-      <div className={`flex flex-col flex-1 w-full max-w-md mx-auto shadow-2xl relative overflow-hidden transition-all duration-500 bg-white min-h-screen ${theme === 'day' ? 'surface-cozy text-[#4A3E3D]' : 'bg-[#1A120B] text-[#E8D5C4] border-x border-orange-950/20'}`}>
-        
+      <div className={`flex flex-col flex-1 w-full max-w-md mx-auto shadow-2xl relative overflow-hidden transition-all duration-500 min-h-screen text-ink ${theme === 'day' ? 'surface-cozy' : 'bg-app border-x border-line'}`}>
+
         {/* TOP NAVBAR */}
-        <header className={`px-3.5 py-3 flex items-center justify-between gap-3 transition-colors duration-500 ${theme === 'day' ? 'wood-grain text-white shadow-md' : 'border-b border-orange-950/40 bg-[#130C07] text-[#E8D5C4]'}`}>
+        <header className={`px-3.5 py-3 flex items-center justify-between gap-3 transition-colors duration-500 shadow-md text-header-ink ${theme === 'day' ? 'wood-grain' : 'border-b border-line bg-strip'}`}>
           <div className="flex items-center gap-2.5 min-w-0">
-            <span className={`w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 shadow-sm overflow-hidden ${theme === 'day' ? 'bg-[#FBEAD3] ring-1 ring-black/10' : 'bg-orange-950 text-[#D4A373]'}`}>
+            <span className={`w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 shadow-sm overflow-hidden bg-logo ${theme === 'day' ? 'ring-1 ring-black/10' : 'ring-1 ring-line-strong text-accent'}`}>
               {theme === 'day' ? (
                 <img src={logoImg} alt="ตู้กับข้าวบ้านยาย" className="w-full h-full object-cover" />
               ) : (
@@ -297,9 +301,13 @@ function App() {
               )}
             </span>
             <h1
-              className={`font-kanit font-bold tracking-wide leading-none select-none truncate ${theme === 'day' ? 'text-xl text-white [text-shadow:0_1px_3px_rgba(60,30,10,0.55)]' : 'text-sm'}`}
+              className={`font-kanit font-bold tracking-wide leading-none select-none truncate text-xl ${theme === 'day' ? '[text-shadow:0_1px_3px_rgba(60,30,10,0.55)]' : ''}`}
             >
-              {theme === 'day' ? settings.name : 'Siam Blend Bar'}
+              {/* Saved settings predate nameNight, so fall back to the default
+                  rather than rendering an empty header. */}
+              {theme === 'day'
+                ? settings.name
+                : (settings.nameNight || DEFAULT_SETTINGS.nameNight)}
             </h1>
           </div>
 
@@ -308,7 +316,7 @@ function App() {
             {role === 'customer' && (
               <button
                 onClick={() => setTheme(prev => prev === 'day' ? 'night' : 'day')}
-                className={`w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 shadow-sm ${theme === 'day' ? 'bg-white/95 hover:bg-white text-[#6B4021]' : 'bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-[#D4A373]'}`}
+                className={`w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 shadow-sm bg-raised hover:bg-raised-hover text-raised-ink ${theme === 'day' ? '' : 'border border-line-strong'}`}
                 title="เปลี่ยนช่วงเวลา/ธีม"
               >
                 {theme === 'day' ? <Moon className="w-5 h-5" /> : <Sun className="w-4 h-4" />}
@@ -319,9 +327,9 @@ function App() {
             <div className="relative">
               <button
                 onClick={() => setShowRoleDropdown(prev => !prev)}
-                className={`flex items-center gap-1.5 rounded-full font-kanit font-semibold tracking-wide transition-all ${theme === 'day' ? 'bg-white/95 hover:bg-white text-[#6B4021] text-base px-5 py-2 shadow-sm' : 'bg-neutral-900/90 border border-neutral-800 text-neutral-300 hover:bg-neutral-800 text-[11px] px-2.5 py-1.5'}`}
+                className={`flex items-center gap-1.5 rounded-full font-kanit font-semibold tracking-wide transition-all bg-raised hover:bg-raised-hover ${theme === 'day' ? 'text-raised-ink text-base px-5 py-2 shadow-sm' : 'border border-line-strong text-ink text-sm px-4 py-2'}`}
               >
-                {theme !== 'day' && <User className="w-3 h-3 text-amber-600" />}
+                {theme !== 'day' && <User className="w-3.5 h-3.5 text-accent" />}
                 <span>
                   {role === 'customer' ? `โต๊ะ ${tableNo}` : role === 'staff' ? 'พนักงาน' : 'ผู้บริหาร'}
                 </span>
@@ -468,13 +476,10 @@ function App() {
 
           {loadState === 'ready' && role === 'owner' && (
             <OwnerView
-              theme={theme} 
               menu={menu}
-              setMenu={setMenu} 
+              expenses={expenses}
+              setExpenses={setExpenses}
               orders={orders}
-              setOrders={setOrders}
-              stock={stock}
-              setStock={setStock}
               settings={settings}
               setSettings={setSettings}
               staff={staff}
@@ -486,7 +491,7 @@ function App() {
 
         {/* LOGOUT ACTION FOR STAFF/OWNER */}
         {role !== 'customer' && (
-          <div className={`p-3 border-t text-center flex justify-between items-center text-xs font-thai ${theme === 'day' ? 'bg-[#F7F3EB] border-orange-100 text-[#4A3E3D]' : 'bg-[#130C07] border-orange-950/40 text-[#E8D5C4]'}`}>
+          <div className="p-3 border-t text-center flex justify-between items-center text-xs font-thai bg-strip border-line text-ink">
             <span className="font-semibold text-[11px]">
               ล็อกอินเป็น: <b className="text-amber-600">{activeStaffUser}</b>
             </span>
@@ -501,7 +506,7 @@ function App() {
         )}
 
         {/* FOOTER */}
-        <footer className={`text-[10px] text-center py-2 text-neutral-400 border-t font-thai transition-colors duration-500 ${theme === 'day' ? 'border-orange-100 bg-[#F7F3EB] text-orange-900/60' : 'border-orange-950/40 bg-[#130C07] text-amber-900/40'}`}>
+        <footer className="text-[10px] text-center py-2 border-t font-thai transition-colors duration-500 border-line bg-strip text-ink-3">
           ระบบร้านค้าอัจฉริยะ &bull; <button onClick={triggerPwa} className="underline hover:text-amber-500 font-bold focus:outline-none">ติดตั้งแอปรวม (PWA)</button>
         </footer>
       </div>

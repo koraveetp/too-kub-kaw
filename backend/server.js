@@ -34,6 +34,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SEED } from './seed.js';
 import { fetchMenuFromDb } from './menu-db.js';
+import { ensureOrdersTable, loadOrders, saveOrders } from './orders-db.js';
 import { hashPassword, verifyPassword, isHashed, signToken, verifyToken } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -53,11 +54,12 @@ if (!HAS_DB) {
 }
 
 // The resources a client is allowed to read/replace.
-const RESOURCES = ['orders', 'menu', 'stock', 'staff', 'settings'];
+const RESOURCES = ['orders', 'menu', 'stock', 'staff', 'settings', 'expenses'];
 // Writing any of these requires a valid staff session token. `orders` and
 // `stock` are left out on purpose: an unauthenticated customer placing an order
-// appends an order AND decrements stock from the browser.
-const PROTECTED_RESOURCES = new Set(['menu', 'staff', 'settings']);
+// appends an order AND decrements stock from the browser. `expenses` is
+// owner-only bookkeeping, so it stays protected.
+const PROTECTED_RESOURCES = new Set(['menu', 'staff', 'settings', 'expenses']);
 
 // --- Load / persist state ---------------------------------------------------
 let state;
@@ -91,12 +93,52 @@ function migrateStaffPasswords() {
 }
 migrateStaffPasswords();
 
+// Write to a temp file first, then rename over the real one. rename() is
+// atomic, so a process that dies mid-write leaves data.json either fully old or
+// fully new — never the half-written file that JSON.parse rejects on the next
+// boot (which silently reseeds and loses the day's orders).
 function persist() {
-  fs.writeFile(DATA_FILE, JSON.stringify(state, null, 2), (err) => {
-    if (err) console.error('[backend] Failed to write data.json:', err);
+  const tmp = `${DATA_FILE}.tmp`;
+  fs.writeFile(tmp, JSON.stringify(state, null, 2), (err) => {
+    if (err) return console.error('[backend] Failed to write data.json:', err);
+    fs.rename(tmp, DATA_FILE, (renameErr) => {
+      if (renameErr) console.error('[backend] Failed to replace data.json:', renameErr);
+    });
   });
 }
 persist();
+
+// Mirror the orders array into Postgres. data.json stays as a local backup, but
+// the database is the copy that matters: it survives a corrupt file, can be
+// backed up with pg_dump, and can be queried directly in pgAdmin.
+//
+// Failures are logged, never thrown — orders-db.js only marks a row as saved
+// once the write succeeds, so the next save retries whatever did not land.
+let ordersWriteInFlight = false;
+let ordersWriteQueued = false;
+
+async function persistOrdersToDb() {
+  if (!HAS_DB) return;
+  // Collapse a burst of writes into one follow-up pass instead of queueing a
+  // round trip per request.
+  if (ordersWriteInFlight) {
+    ordersWriteQueued = true;
+    return;
+  }
+  ordersWriteInFlight = true;
+  try {
+    const saved = await saveOrders(state.orders);
+    if (saved) console.log(`[backend] Saved ${saved} order(s) to PostgreSQL`);
+  } catch (err) {
+    console.warn(`[backend] Could not save orders to PostgreSQL, will retry on next write. (${err.message})`);
+  } finally {
+    ordersWriteInFlight = false;
+    if (ordersWriteQueued) {
+      ordersWriteQueued = false;
+      persistOrdersToDb();
+    }
+  }
+}
 
 // A copy of the state that is safe to send to a browser: staff objects keep
 // their username and display name but never their password hash.
@@ -129,7 +171,12 @@ function broadcast() {
 async function syncMenuFromDb() {
   const { menu: dbMenu, addons: dbAddons, choices: dbChoices } = await fetchMenuFromDb();
   const prevAvailById = new Map((state.menu || []).map((m) => [m.id, m.available]));
-  const manualItems = (state.menu || []).filter((m) => m.theme !== 'day');
+  // The database owns every theme it actually supplies. Until the night menu is
+  // imported it supplies only 'day', so the hand-curated night menu in seed.js
+  // survives untouched; once night rows exist, the database takes over and the
+  // seeded copy is dropped rather than duplicated alongside it.
+  const dbThemes = new Set(dbMenu.map((item) => item.theme));
+  const manualItems = (state.menu || []).filter((m) => !dbThemes.has(m.theme));
   const nextMenu = [
     ...dbMenu.map((item) =>
       prevAvailById.has(item.id)
@@ -138,9 +185,18 @@ async function syncMenuFromDb() {
     ),
     ...manualItems,
   ];
-  // The database owns the day-time extras; the night bar's are curated in-app.
-  const nextAddons = { ...(state.addons || {}), ...dbAddons };
-  const nextChoices = { ...(state.choices || {}), ...dbChoices };
+  // Same rule for the extras, but an EMPTY bucket from the database never wins:
+  // before the night menu is imported dbAddons.night is [], and letting that
+  // overwrite the seeded night extras would silently empty the bar's list.
+  const mergeBuckets = (current, incoming) => {
+    const out = { ...(current || {}) };
+    for (const [bucket, list] of Object.entries(incoming || {})) {
+      if (Array.isArray(list) && list.length) out[bucket] = list;
+    }
+    return out;
+  };
+  const nextAddons = mergeBuckets(state.addons, dbAddons);
+  const nextChoices = mergeBuckets(state.choices, dbChoices);
 
   // Only touch state when something actually differs, so the poll below stays
   // silent (no disk write, no SSE push) while the database is untouched.
@@ -348,6 +404,13 @@ function validateResourceBody(resource, body) {
       return null;
     case 'menu':
       return Array.isArray(body) ? null : 'menu must be an array';
+    case 'expenses':
+      if (!Array.isArray(body)) return 'expenses must be an array';
+      if (body.length > 20000) return 'too many expenses';
+      if (!body.every((e) => e && typeof e === 'object' && !Array.isArray(e))) {
+        return 'each expense must be an object';
+      }
+      return null;
     case 'stock':
     case 'settings':
       return body && typeof body === 'object' && !Array.isArray(body)
@@ -383,6 +446,11 @@ app.put('/api/:resource', (req, res) => {
   }
 
   persist();
+  // Sales data additionally goes to Postgres, which is its real home. This is
+  // deliberately not awaited: the write is already safe in memory + data.json,
+  // and a slow or briefly unreachable database must never stall the tab that
+  // is trying to take an order.
+  if (resource === 'orders') persistOrdersToDb();
   broadcast();
   res.json({ ok: true });
 });
@@ -420,6 +488,29 @@ app.use((err, _req, res, _next) => {
 
 const server = app.listen(PORT, () => {
   console.log(`[backend] API + real-time server running on http://localhost:${PORT}`);
+
+  // Bring orders in from PostgreSQL. On the very first run the table is empty,
+  // so whatever is already in data.json is migrated up into it — nobody has to
+  // move their existing sales by hand.
+  if (HAS_DB) {
+    (async () => {
+      await ensureOrdersTable();
+      const dbOrders = await loadOrders();
+      if (dbOrders.length) {
+        state.orders = dbOrders; // the database is the source of truth
+        persist();
+        broadcast();
+        console.log(`[backend] Loaded ${dbOrders.length} order(s) from PostgreSQL`);
+      } else if (Array.isArray(state.orders) && state.orders.length) {
+        const moved = await saveOrders(state.orders);
+        console.log(`[backend] Migrated ${moved} existing order(s) from data.json into PostgreSQL`);
+      } else {
+        console.log('[backend] Orders table ready (no orders yet)');
+      }
+    })().catch((err) =>
+      console.warn(`[backend] Orders are NOT being saved to PostgreSQL — check DATABASE_URL. (${err.message})`)
+    );
+  }
 
   // Sync the menu from PostgreSQL on startup. If the DB is unreachable the app
   // keeps running on the last-known (seed/persisted) menu.

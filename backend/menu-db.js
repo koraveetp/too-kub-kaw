@@ -14,35 +14,45 @@
 //   DATABASE_URL=postgres://USER:PASSWORD@localhost:5432/restaurant
 // ---------------------------------------------------------------------------
 
-import pg from 'pg';
+import { getPool } from './db.js';
 import {
   menuRowsToMenu,
   addonRowsToAddons,
   choiceRowsToChoices,
 } from './menu-transform.js';
 
-const { Pool } = pg;
-
-// One shared pool for the whole process (created lazily so importing this file
-// without a DATABASE_URL set never throws).
-let pool;
-function getPool() {
-  if (!pool) {
-    const connectionString = (process.env.DATABASE_URL || '').trim();
-    if (!connectionString) {
-      throw new Error(
-        'DATABASE_URL is not set. Add it to backend/.env, e.g. ' +
-        'postgres://USER:PASSWORD@localhost:5432/restaurant'
-      );
-    }
-    pool = new Pool({ connectionString });
-  }
-  return pool;
-}
-
 // Read menu_items and hand back rows keyed by the Thai column names, so the
 // shared transforms in menu-transform.js can consume them unchanged.
+// Does menu_items carry the day/night `theme` column yet? A table created
+// before the night menu existed does not, so it is detected once rather than
+// assumed — that way starting the server before running the ALTER prints a hint
+// instead of crashing with a bare "column does not exist".
+let themeColumn = null;
+async function hasThemeColumn() {
+  if (themeColumn === null) {
+    const { rows } = await getPool().query(`
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'menu_items' AND column_name = 'theme'
+      LIMIT 1
+    `);
+    themeColumn = rows.length > 0;
+    if (!themeColumn) {
+      console.warn(
+        '[backend] menu_items has no "theme" column — treating every item as ' +
+        'the DAY menu. Add it with:  ALTER TABLE menu_items ADD COLUMN theme TEXT;'
+      );
+    }
+  }
+  return themeColumn;
+}
+
 async function fetchMenuRows() {
+  // `theme` keeps its English name: it is a database concept, not a column that
+  // ever existed in the spreadsheet the Thai aliases mirror.
+  const themeSelect = (await hasThemeColumn())
+    ? `COALESCE(theme, 'day') AS theme`
+    : `'day' AS theme`;
+
   const { rows } = await getPool().query(`
     SELECT category    AS "หมวดหมู่",
            type        AS "ประเภท",
@@ -50,7 +60,8 @@ async function fetchMenuRows() {
            name        AS "ชื่อรายการ",
            meat        AS "เนื้อสัตว์",
            price       AS "ราคา (บาท)",
-           image_url   AS "รูปภาพ"
+           image_url   AS "รูปภาพ",
+           ${themeSelect}
     FROM menu_items
     ORDER BY id
   `);
