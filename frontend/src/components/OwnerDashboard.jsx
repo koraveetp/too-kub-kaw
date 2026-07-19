@@ -12,8 +12,14 @@ import {
 
 // Categorical slots 1 and 2 of the validated palette. Sales and profit are both
 // in baht, so they share ONE y-axis — never a second scale.
-const C_REVENUE = '#2a78d6';
-const C_PROFIT = '#008300';
+//
+// The two hues live in index.css (--c-chart-*) because they have to lighten for
+// the night theme: the day blue and green are picked for contrast against a
+// white card and go muddy on a near-black one. These string forms are for
+// inline `style` only — SVG presentation attributes don't accept var(), so the
+// chart marks below reach the same variables through stroke-/fill- classes.
+const C_REVENUE = 'var(--c-chart-revenue)';
+const C_PROFIT = 'var(--c-chart-profit)';
 
 const SHIFT_TABS = [
   { id: 'all', label: 'ทั้งหมด' },
@@ -61,7 +67,7 @@ function axisBounds(points) {
 function StatTile({ label, value, delta, tone, Icon }) {
   const up = delta != null && delta >= 0;
   return (
-    <div className="bg-white border rounded-2xl p-3.5 shadow-xs">
+    <div className="bg-admin-card border rounded-2xl p-3.5 shadow-xs">
       <span className={`text-[10px] font-extrabold font-kanit px-2 py-1 rounded-lg ${tone}`}>
         {label}
       </span>
@@ -147,8 +153,8 @@ function TrendChart({ points, range }) {
         {/* gridlines + y labels */}
         {ticks.map((t, i) => (
           <g key={i}>
-            <line x1={padL} x2={W - padR} y1={y(t)} y2={y(t)} stroke="#eceae5" strokeWidth="1" />
-            <text x={padL - 6} y={y(t) + 3} textAnchor="end" fontSize="7" fill="#8a8880">
+            <line x1={padL} x2={W - padR} y1={y(t)} y2={y(t)} className="stroke-chart-grid" strokeWidth="1" />
+            <text x={padL - 6} y={y(t) + 3} textAnchor="end" fontSize="7" className="fill-chart-axis">
               {baht(t)}
             </text>
           </g>
@@ -156,13 +162,13 @@ function TrendChart({ points, range }) {
 
         {/* break-even line, drawn darker so losses read as below it */}
         {lo < 0 && (
-          <line x1={padL} x2={W - padR} y1={y(0)} y2={y(0)} stroke="#b8b4ab" strokeWidth="1" />
+          <line x1={padL} x2={W - padR} y1={y(0)} y2={y(0)} className="stroke-chart-zero" strokeWidth="1" />
         )}
 
         {/* x labels */}
         {points.map((p, i) =>
           i % labelEvery === 0 ? (
-            <text key={p.key} x={x(i)} y={H - 8} textAnchor="middle" fontSize="7.5" fill="#8a8880">
+            <text key={p.key} x={x(i)} y={H - 8} textAnchor="middle" fontSize="7.5" className="fill-chart-axis">
               {shortLabel(p)}
             </text>
           ) : null
@@ -171,15 +177,15 @@ function TrendChart({ points, range }) {
         {/* Profit is dashed so it stays readable where it sits exactly on top of
             revenue — which is every day with no expenses recorded yet. The dash
             doubles as the secondary encoding the palette rules ask for. */}
-        <path d={path('revenue')} fill="none" stroke={C_REVENUE} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-        <path d={path('profit')} fill="none" stroke={C_PROFIT} strokeWidth="2" strokeDasharray="5 3" strokeLinejoin="round" strokeLinecap="round" />
+        <path d={path('revenue')} fill="none" className="stroke-chart-revenue" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        <path d={path('profit')} fill="none" className="stroke-chart-profit" strokeWidth="2" strokeDasharray="5 3" strokeLinejoin="round" strokeLinecap="round" />
 
         {/* crosshair + markers, drawn with a surface ring so they read over the lines */}
         {hp && (
           <g>
-            <line x1={x(hover)} x2={x(hover)} y1={padT} y2={padT + plotH} stroke="#c9c5bd" strokeWidth="1" strokeDasharray="3 3" />
-            <circle cx={x(hover)} cy={y(hp.revenue)} r="4.5" fill={C_REVENUE} stroke="#fff" strokeWidth="2" />
-            <circle cx={x(hover)} cy={y(hp.profit)} r="4.5" fill={C_PROFIT} stroke="#fff" strokeWidth="2" />
+            <line x1={x(hover)} x2={x(hover)} y1={padT} y2={padT + plotH} className="stroke-chart-cross" strokeWidth="1" strokeDasharray="3 3" />
+            <circle cx={x(hover)} cy={y(hp.revenue)} r="4.5" className="fill-chart-revenue stroke-chart-surface" strokeWidth="2" />
+            <circle cx={x(hover)} cy={y(hp.profit)} r="4.5" className="fill-chart-profit stroke-chart-surface" strokeWidth="2" />
           </g>
         )}
       </svg>
@@ -187,7 +193,7 @@ function TrendChart({ points, range }) {
       {/* tooltip */}
       {hp && (
         <div
-          className={`absolute top-0 bg-white/95 border rounded-xl px-2.5 py-1.5 text-[10px] shadow-sm pointer-events-none font-thai ${
+          className={`absolute top-0 bg-admin-card border rounded-xl px-2.5 py-1.5 text-[10px] shadow-sm pointer-events-none font-thai ${
             hover > points.length / 2 ? 'left-0' : 'right-0'
           }`}
         >
@@ -247,7 +253,7 @@ function OwnerDashboard({ orders, expenses, menu }) {
           <button
             key={t.id}
             onClick={() => setShift(t.id)}
-            className={`flex-1 py-2 rounded-lg transition ${t.id === shift ? 'bg-white text-neutral-800 shadow-xs' : 'text-neutral-500'}`}
+            className={`flex-1 py-2 rounded-lg transition ${t.id === shift ? 'bg-admin-field text-neutral-800 shadow-xs' : 'text-neutral-500'}`}
           >
             {t.label}
           </button>
@@ -260,14 +266,14 @@ function OwnerDashboard({ orders, expenses, menu }) {
           label="ยอดขายวันนี้"
           value={todayTotals.revenue}
           delta={percentChange(todayTotals.revenue, prevTotals.revenue)}
-          tone="bg-green-100 text-green-800"
+          tone="bg-admin-income-soft text-admin-income-ink"
           Icon={TrendingUp}
         />
         <StatTile
           label="รายจ่ายวันนี้"
           value={todayTotals.expense}
           delta={percentChange(todayTotals.expense, prevTotals.expense)}
-          tone="bg-red-100 text-red-800"
+          tone="bg-admin-expense-soft text-admin-expense-ink"
           Icon={Wallet}
         />
         <StatTile
@@ -280,13 +286,13 @@ function OwnerDashboard({ orders, expenses, menu }) {
       </div>
 
       {/* TREND CHART */}
-      <div className="bg-white border rounded-2xl p-3 shadow-xs space-y-2">
+      <div className="bg-admin-card border rounded-2xl p-3 shadow-xs space-y-2">
         <div className="flex gap-1.5 bg-neutral-100 rounded-xl p-1 text-[11px] font-bold">
           {RANGES.map(r => (
             <button
               key={r.id}
               onClick={() => setRange(r.id)}
-              className={`flex-1 py-1.5 rounded-lg transition ${r.id === range ? 'bg-white text-neutral-800 shadow-xs' : 'text-neutral-500'}`}
+              className={`flex-1 py-1.5 rounded-lg transition ${r.id === range ? 'bg-admin-field text-neutral-800 shadow-xs' : 'text-neutral-500'}`}
             >
               {r.label}
             </button>
@@ -301,7 +307,7 @@ function OwnerDashboard({ orders, expenses, menu }) {
           </span>
           <span className="flex items-center gap-1.5">
             <svg width="14" height="2" aria-hidden="true">
-              <line x1="0" y1="1" x2="14" y2="1" stroke={C_PROFIT} strokeWidth="2" strokeDasharray="5 3" />
+              <line x1="0" y1="1" x2="14" y2="1" className="stroke-chart-profit" strokeWidth="2" strokeDasharray="5 3" />
             </svg>
             กำไร
           </span>
@@ -311,7 +317,7 @@ function OwnerDashboard({ orders, expenses, menu }) {
       </div>
 
       {/* MENU STATS */}
-      <div className="bg-white border rounded-2xl overflow-hidden shadow-xs">
+      <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs">
         <div className="p-3.5 pb-2.5 space-y-2.5">
           <h3 className="font-extrabold text-base font-kanit text-neutral-800">สถิติเมนู</h3>
 
@@ -320,7 +326,7 @@ function OwnerDashboard({ orders, expenses, menu }) {
               <button
                 key={g.id}
                 onClick={() => setGroup(g.id)}
-                className={`flex-1 py-1.5 rounded-lg transition ${g.id === group ? 'bg-white text-neutral-800 shadow-xs' : 'text-neutral-500'}`}
+                className={`flex-1 py-1.5 rounded-lg transition ${g.id === group ? 'bg-admin-field text-neutral-800 shadow-xs' : 'text-neutral-500'}`}
               >
                 {g.label}
               </button>
@@ -332,7 +338,7 @@ function OwnerDashboard({ orders, expenses, menu }) {
             <select
               value={sortBy}
               onChange={e => setSortBy(e.target.value)}
-              className="flex-1 border rounded-xl py-1.5 px-2 text-[11px] font-bold text-neutral-600 bg-white focus:outline-none focus:ring-1 focus:ring-amber-500"
+              className="flex-1 border rounded-xl py-1.5 px-2 text-[11px] font-bold text-neutral-600 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500"
             >
               <option value="qty">จำนวนจานที่ขายได้มากสุด</option>
               <option value="revenue">ยอดขายรวมมากสุด</option>

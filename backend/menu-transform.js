@@ -121,8 +121,26 @@ function idFor(theme, heading, name) {
   return `d${hash.toString(36)}`;
 }
 
-// Map cleaned rows onto menu items.
-export function menuRowsToMenu(rows) {
+// Is this row on sale? Rows from a table without the `available` column (or any
+// other source) arrive with the field missing, which reads as "on sale" — the
+// same default the column itself carries.
+function rowAvailable(row) {
+  return row?.available !== false;
+}
+
+// Group the raw rows into dishes WITHOUT dropping the source rows.
+//
+// This is the single definition of "which rows make up one dish", and both
+// callers depend on it agreeing exactly:
+//   * menuRowsToMenu() below, which builds the cards the app renders
+//   * menu-db.js setDishAvailability(), which has to find the DB rows behind a
+//     dish id in order to UPDATE them
+//
+// Matching those rows back by (theme, subcategory, name) instead would quietly
+// fail for any dish with protein options: stripTrailingProtein() means the
+// dish's app-level name ("ต้มจืดเต้าหู้") is not the name in any of its rows
+// ("ต้มจืดเต้าหู้ หมูสับ"). Going through the same grouping avoids that.
+export function groupDishRows(rows) {
   // Only real dishes. `รายการเสริม` rows are add-ons (ไข่ดาว, ท็อปปิ้ง, ขนาด,
   // ระดับความหวาน) and must not appear as cards in the menu.
   const dishRows = rows.filter((r) => text(r[COL.kind]) === KIND_DISH);
@@ -155,10 +173,10 @@ export function menuRowsToMenu(rows) {
       groups.push(g);
     }
     if (!g.image) g.image = text(row[COL.image]); // first variant that has one
-    g.rows.push({ rawName, protein, price: toNumber(row[COL.price], 0) });
+    g.rows.push({ row, rawName, protein, price: toNumber(row[COL.price], 0) });
   }
 
-  // Pass 2 — emit one menu item per group.
+  // Pass 2 — resolve each group's identity (id + display name + options).
   return groups.map((g) => {
     const variants = g.rows.filter((r) => r.protein);
     // 2+ protein variants -> a single dish with selectable options.
@@ -177,16 +195,38 @@ export function menuRowsToMenu(rows) {
       id: idFor(g.theme, g.heading, name),
       name,
       price,
-      category: g.heading || 'อื่นๆ',
-      group: g.group,
-      theme: g.theme, // from the `theme` column: 'day' or 'night'
-      emoji: emojiFor(g.name),
-      image: g.image,
-      desc: '',
       options,
-      available: true,
+      baseName: g.name, // protein stripped; what the emoji fallback keys off
+      heading: g.heading,
+      theme: g.theme,
+      group: g.group,
+      image: g.image,
+      // A dish is on sale while ANY of its rows is. Toggling from the owner tab
+      // always writes every row of the dish at once, so the two agree; the
+      // "any" rule only decides the case where someone flips a subset of rows
+      // by hand in pgAdmin, and there it keeps the dish orderable rather than
+      // hiding it because one protein went off.
+      available: g.rows.some((r) => rowAvailable(r.row)),
+      sourceRows: g.rows.map((r) => r.row),
     };
   });
+}
+
+// Map cleaned rows onto menu items.
+export function menuRowsToMenu(rows) {
+  return groupDishRows(rows).map((dish) => ({
+    id: dish.id,
+    name: dish.name,
+    price: dish.price,
+    category: dish.heading || 'อื่นๆ',
+    group: dish.group,
+    theme: dish.theme, // from the `theme` column: 'day' or 'night'
+    emoji: emojiFor(dish.baseName),
+    image: dish.image,
+    desc: '',
+    options: dish.options,
+    available: dish.available,
+  }));
 }
 
 // Map the `รายการเสริม` rows onto the tick-box extras shown in the order

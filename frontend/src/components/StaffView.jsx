@@ -561,7 +561,7 @@ function StaffView({
                     <button
                       key={s.k}
                       onClick={() => setShiftView(s.k)}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition ${s.k === shiftView ? 'bg-white text-neutral-800 shadow-xs' : 'text-neutral-500 hover:text-neutral-700'}`}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition ${s.k === shiftView ? 'bg-admin-field text-neutral-800 shadow-xs' : 'text-neutral-500 hover:text-neutral-700'}`}
                     >
                       <Icon className="w-3.5 h-3.5" />
                       <span>{s.l}</span>
@@ -580,7 +580,7 @@ function StaffView({
                 <button
                   key={f.k}
                   onClick={() => setOrderFilter(f.k)}
-                  className={`px-3.5 py-1.5 rounded-full font-bold text-xs whitespace-nowrap transition border ${f.k === orderFilter ? 'bg-neutral-800 border-neutral-800 text-white' : 'bg-white border-neutral-200 text-neutral-500'}`}
+                  className={`px-3.5 py-1.5 rounded-full font-bold text-xs whitespace-nowrap transition border ${f.k === orderFilter ? 'bg-ctl border-ctl text-ctl-ink' : 'bg-admin-card border-neutral-200 text-neutral-500'}`}
                 >
                   {f.l}
                 </button>
@@ -590,10 +590,10 @@ function StaffView({
             {filteredOrders.length > 0 ? (
               <div className="grid grid-cols-1 gap-3.5">
                 {filteredOrders.map(order => (
-                  <div key={order.id} className="border border-neutral-200 bg-white rounded-2xl p-4 shadow-xs relative">
+                  <div key={order.id} className="border border-neutral-200 bg-admin-card rounded-2xl p-4 shadow-xs relative">
                     <div className="flex justify-between items-center border-b pb-2 mb-2">
                       <div className="flex items-center gap-2">
-                        <span className="font-extrabold bg-neutral-800 text-white text-[11px] px-2 py-0.5 rounded-md font-kanit">
+                        <span className="font-extrabold bg-ctl text-ctl-ink text-[11px] px-2 py-0.5 rounded-md font-kanit">
                           โต๊ะ {order.table}
                         </span>
                         <span className="font-mono text-neutral-400 text-xs font-semibold">{order.no}</span>
@@ -674,7 +674,7 @@ function StaffView({
       case 'take-order':
         return (
           <div className="space-y-4">
-            <div className="bg-white border rounded-2xl p-4 space-y-3 shadow-xs">
+            <div className="bg-admin-card border rounded-2xl p-4 space-y-3 shadow-xs">
               <div>
                 <label className="block text-xs font-bold text-neutral-400 mb-1 uppercase">เลือกโต๊ะที่ต้องการรับออเดอร์</label>
                 <select 
@@ -695,7 +695,7 @@ function StaffView({
                   <button
                     key={c}
                     onClick={() => setDirectCat(c)}
-                    className={`px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap transition border ${c === directCat ? 'bg-neutral-800 border-neutral-800 text-white' : 'bg-neutral-100 border-neutral-200 text-neutral-500'}`}
+                    className={`px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap transition border ${c === directCat ? 'bg-ctl border-ctl text-ctl-ink' : 'bg-neutral-100 border-neutral-200 text-neutral-500'}`}
                   >
                     {c}
                   </button>
@@ -718,7 +718,7 @@ function StaffView({
 
                       <button
                         onClick={() => handleOpenDetail(dish, 'cart')}
-                        className="bg-neutral-800 hover:bg-neutral-700 text-white font-bold px-3 py-1.5 rounded-lg transition text-[11px] disabled:opacity-40"
+                        className="bg-ctl hover:bg-ctl-hover text-ctl-ink font-bold px-3 py-1.5 rounded-lg transition text-[11px] disabled:opacity-40"
                         disabled={!dish.available}
                       >
                         {dish.available ? '+ เลือก' : 'หมด'}
@@ -731,7 +731,7 @@ function StaffView({
               {/* Custom item entry — staff types a menu item that isn't listed */}
               <button
                 onClick={openCustomModal}
-                className="w-full flex items-center justify-center gap-1.5 border-2 border-dashed border-neutral-300 hover:border-amber-500 hover:bg-amber-50 text-neutral-600 hover:text-amber-700 font-bold py-2.5 rounded-xl transition text-xs"
+                className="w-full flex items-center justify-center gap-1.5 border-2 border-dashed border-neutral-300 hover:border-amber-500 hover:bg-amber-500/10 text-neutral-600 hover:text-amber-700 font-bold py-2.5 rounded-xl transition text-xs"
               >
                 <Plus className="w-4 h-4" />
                 <span>เมนูอื่นๆ (คีย์เอง)</span>
@@ -740,7 +740,7 @@ function StaffView({
 
             {/* Direct Cart Summary */}
             {takeOrderCart.length > 0 && (
-              <div className="bg-white border rounded-2xl p-4 space-y-3.5 shadow-xs font-thai text-xs">
+              <div className="bg-admin-card border rounded-2xl p-4 space-y-3.5 shadow-xs font-thai text-xs">
                 <div className="flex justify-between items-center font-kanit font-extrabold text-sm text-neutral-800">
                   <span>สรุปรายการสั่งซื้อ ({targetTable})</span>
                   <span className="font-mono text-amber-600">฿{takeOrderCart.reduce((sum, item) => sum + (item.basePrice + item.addonCost) * item.qty, 0).toLocaleString()}</span>
@@ -762,7 +762,7 @@ function StaffView({
                         <span className="font-mono">฿{(item.basePrice + item.addonCost) * item.qty}</span>
                         <button
                           onClick={() => handleRemoveDirectCartItem(item.id)}
-                          className="text-red-500 hover:text-red-700 p-0.5 rounded hover:bg-red-50"
+                          className="text-red-500 hover:text-red-700 p-0.5 rounded hover:bg-red-500/10"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -804,7 +804,7 @@ function StaffView({
                         setSubTab('take-order');
                       }
                     }}
-                    className={`border rounded-2xl p-3.5 flex flex-col justify-between items-center text-center cursor-pointer transition hover:scale-[1.03] active:scale-[0.97] h-28 relative shadow-xs ${status.active ? 'bg-amber-500/10 border-amber-500 text-amber-900' : 'bg-white border-neutral-200 text-neutral-600'}`}
+                    className={`border rounded-2xl p-3.5 flex flex-col justify-between items-center text-center cursor-pointer transition hover:scale-[1.03] active:scale-[0.97] h-28 relative shadow-xs ${status.active ? 'bg-amber-500/10 border-amber-500 text-amber-900 dark:text-amber-200' : 'bg-admin-card border-neutral-200 text-neutral-600'}`}
                   >
                     <span className="font-bold text-xs uppercase text-neutral-400 font-kanit">โต๊ะ {tableNum}</span>
                     <span className="text-xl">{status.active ? '🍛' : '🍽️'}</span>
@@ -856,7 +856,7 @@ function StaffView({
                 </button>
                 <button
                   onClick={() => handleRestock(10)}
-                  className="flex items-center gap-1 bg-neutral-800 hover:bg-neutral-700 text-white font-bold py-1.5 px-3 rounded-xl text-xs transition"
+                  className="flex items-center gap-1 bg-ctl hover:bg-ctl-hover text-ctl-ink font-bold py-1.5 px-3 rounded-xl text-xs transition"
                 >
                   <PlusCircle className="w-3.5 h-3.5" />
                   <span>+10</span>
@@ -864,7 +864,7 @@ function StaffView({
               </div>
             </div>
 
-            <div className="bg-white border rounded-2xl overflow-hidden shadow-xs divide-y divide-neutral-100">
+            <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs divide-y divide-neutral-100">
               {Object.keys(stock).filter(key => stock[key].theme === theme).map(key => {
                 const item = stock[key];
                 const isLow = item.count <= item.min;
@@ -900,7 +900,7 @@ function StaffView({
                         </button>
                         <button
                           onClick={() => adjustStock(key, 10)}
-                          className="bg-neutral-800 hover:bg-neutral-700 text-white font-bold px-2 py-0.5 rounded-lg text-[10px] transition"
+                          className="bg-ctl hover:bg-ctl-hover text-ctl-ink font-bold px-2 py-0.5 rounded-lg text-[10px] transition"
                         >
                           +10
                         </button>
@@ -930,7 +930,7 @@ function StaffView({
                 return (
                   <div 
                     key={table}
-                    className="bg-white border border-neutral-200 rounded-2xl p-4 text-center shadow-xs flex flex-col items-center justify-center space-y-2.5 max-w-xs mx-auto w-full"
+                    className="bg-admin-card border border-neutral-200 rounded-2xl p-4 text-center shadow-xs flex flex-col items-center justify-center space-y-2.5 max-w-xs mx-auto w-full"
                   >
                     <b className="font-kanit text-neutral-800 text-sm">โต๊ะให้บริการหมายเลข {table}</b>
                     
@@ -972,7 +972,7 @@ function StaffView({
     <div className="space-y-4 font-thai text-sm">
       
       {/* SECTION TITLE */}
-      <div className="flex justify-between items-center bg-[#F7F3EB]/40 dark:bg-neutral-900/20 p-2.5 rounded-2xl">
+      <div className="flex justify-between items-center bg-admin-panel p-2.5 rounded-2xl">
         <div>
           <h2 className="font-extrabold text-base font-kanit">แผงปฏิบัติงานพนักงาน</h2>
           <span className="text-[10px] text-neutral-400 font-medium">จัดการรับออเดอร์, อัปเดตสถานะ หรือเช็คสต็อกหน้าร้าน</span>
@@ -981,7 +981,7 @@ function StaffView({
           onClick={() => {
             showToast('รีเฟรชข้อมูลล่าสุดเสร็จสมบูรณ์');
           }}
-          className="p-2 border rounded-xl hover:bg-neutral-50 text-neutral-500 bg-white shadow-xs"
+          className="p-2 border rounded-xl hover:bg-neutral-50 text-neutral-500 bg-admin-card shadow-xs"
           title="อัปเดตข้อมูลหน้าร้าน"
         >
           <RefreshCw className="w-4 h-4" />
@@ -1002,7 +1002,7 @@ function StaffView({
             <button
               key={tab.id}
               onClick={() => setSubTab(tab.id)}
-              className={`flex-1 py-2 rounded-lg flex flex-col items-center justify-center gap-1.5 transition ${tab.id === subTab ? 'bg-white text-neutral-800 shadow-xs' : 'text-neutral-500 hover:text-neutral-700'}`}
+              className={`flex-1 py-2 rounded-lg flex flex-col items-center justify-center gap-1.5 transition ${tab.id === subTab ? 'bg-admin-field text-neutral-800 shadow-xs' : 'text-neutral-500 hover:text-neutral-700'}`}
             >
               <Icon className="w-4 h-4" />
               <span>{tab.label}</span>
@@ -1017,7 +1017,7 @@ function StaffView({
       {/* ITEM DETAIL MODAL (add-ons + notes + qty) — same options as customer */}
       {selectedItem && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end justify-center p-0">
-          <div className="bg-white rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
+          <div className="bg-admin-card rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
 
             <div className="flex justify-between items-start">
               <div>
@@ -1051,7 +1051,7 @@ function StaffView({
                   {group.options.map(opt => (
                     <label
                       key={opt.name}
-                      className={`flex items-center justify-between p-2.5 border rounded-xl cursor-pointer transition text-xs font-thai ${selectedChoices[group.name]?.name === opt.name ? 'border-amber-500 bg-amber-50 ring-1 ring-amber-500' : 'border-neutral-150 hover:bg-neutral-50'}`}
+                      className={`flex items-center justify-between p-2.5 border rounded-xl cursor-pointer transition text-xs font-thai ${selectedChoices[group.name]?.name === opt.name ? 'border-amber-500 bg-amber-500/10 ring-1 ring-amber-500' : 'border-neutral-150 hover:bg-neutral-50'}`}
                     >
                       <div className="flex items-center gap-2">
                         <input
@@ -1142,7 +1142,7 @@ function StaffView({
       {/* CUSTOM ITEM MODAL ("เมนูอื่นๆ") — staff-typed item + editable extras */}
       {showCustomModal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end justify-center p-0">
-          <div className="bg-white rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
+          <div className="bg-admin-card rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
 
             <div className="flex justify-between items-start">
               <div>
@@ -1190,13 +1190,13 @@ function StaffView({
                 {Object.entries(customExtras).map(([name, v]) => (
                   <div
                     key={name}
-                    className={`flex items-center justify-between gap-2 p-2.5 border rounded-xl transition text-xs font-thai ${v.on ? 'border-amber-500 bg-amber-50 ring-1 ring-amber-500' : 'border-neutral-150'}`}
+                    className={`flex items-center justify-between gap-2 p-2.5 border rounded-xl transition text-xs font-thai ${v.on ? 'border-amber-500 bg-amber-500/10 ring-1 ring-amber-500' : 'border-neutral-150'}`}
                   >
                     <button
                       onClick={() => toggleCustomExtra(name)}
                       className="flex items-center gap-2 flex-1 text-left"
                     >
-                      <span className={`w-4 h-4 rounded flex items-center justify-center border ${v.on ? 'bg-amber-600 border-amber-600 text-white' : 'border-neutral-300 bg-white'}`}>
+                      <span className={`w-4 h-4 rounded flex items-center justify-center border ${v.on ? 'bg-amber-600 border-amber-600 text-white' : 'border-neutral-300 bg-admin-card'}`}>
                         {v.on && <Check className="w-3 h-3 stroke-[3]" />}
                       </span>
                       <span className="font-semibold text-neutral-700">{name}</span>
@@ -1219,7 +1219,7 @@ function StaffView({
             {/* TAKEAWAY toggle */}
             <button
               onClick={() => setCustomTakeaway(prev => !prev)}
-              className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl font-bold text-xs transition border ${customTakeaway ? 'bg-amber-600 border-amber-600 text-white' : 'bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50'}`}
+              className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl font-bold text-xs transition border ${customTakeaway ? 'bg-amber-600 border-amber-600 text-white' : 'bg-admin-card border-neutral-200 text-neutral-600 hover:bg-neutral-50'}`}
             >
               <span>🏠</span>
               <span>{customTakeaway ? 'กลับบ้าน (เปิดอยู่)' : 'กลับบ้าน'}</span>
@@ -1270,7 +1270,7 @@ function StaffView({
       {/* EDIT BILL MODAL (For modifying active bills) */}
       {editingBill && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-end justify-center p-0">
-          <div className="bg-white rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
+          <div className="bg-admin-card rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
             
             <div className="flex justify-between items-center">
               <h3 className="text-base font-extrabold font-kanit flex items-center gap-1.5 text-neutral-800">
@@ -1319,7 +1319,7 @@ function StaffView({
                       </div>
                       <button 
                         onClick={() => handleRemoveEditBillItem(index)}
-                        className="text-red-500 hover:text-red-700 p-1 rounded-lg hover:bg-red-50"
+                        className="text-red-500 hover:text-red-700 p-1 rounded-lg hover:bg-red-500/10"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -1338,7 +1338,7 @@ function StaffView({
                 <select 
                   value={editAddMenuId}
                   onChange={e => setEditAddMenuId(e.target.value)}
-                  className="flex-1 bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold"
+                  className="flex-1 bg-admin-field border border-neutral-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold"
                 >
                   <option value="">-- เลือกเมนูอาหารที่จะสั่งเพิ่ม --</option>
                   {filteredMenu.filter(m => m.available).map(m => (
@@ -1347,7 +1347,7 @@ function StaffView({
                 </select>
                 <button 
                   onClick={handleAddItemToEditBill}
-                  className="bg-neutral-800 hover:bg-neutral-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition"
+                  className="bg-ctl hover:bg-ctl-hover text-ctl-ink text-xs font-bold px-4 py-2.5 rounded-xl transition"
                 >
                   สั่งเพิ่ม
                 </button>

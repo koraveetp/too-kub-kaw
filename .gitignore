@@ -9,6 +9,8 @@ frontend/dist/
 
 # Runtime / local state
 backend/data.json
+# Menu photos uploaded by the owner — user content, not source
+backend/uploads/
 *.local
 
 # Logs

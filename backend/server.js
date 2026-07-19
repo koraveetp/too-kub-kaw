@@ -29,17 +29,31 @@
 
 import express from 'express';
 import cors from 'cors';
+import multer from 'multer';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { SEED } from './seed.js';
-import { fetchMenuFromDb } from './menu-db.js';
+import {
+  fetchMenuFromDb,
+  fetchMenuOptions,
+  setDishAvailability,
+  insertMenuItem,
+  dishIdentityTaken,
+  hasAvailableColumn,
+} from './menu-db.js';
 import { ensureOrdersTable, loadOrders, saveOrders } from './orders-db.js';
 import { hashPassword, verifyPassword, isHashed, signToken, verifyToken } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = path.join(__dirname, 'data.json');
+const UPLOAD_DIR = path.join(__dirname, 'uploads');
 const PORT = process.env.PORT || 3001;
+
+// Menu photos land here. Created up front so the very first upload has
+// somewhere to go on a fresh clone (the folder is gitignored).
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 // The menu now lives in PostgreSQL. Warn loudly if it is not configured, but
 // keep running on the last-known (seed/persisted) menu so the rest of the app
@@ -170,7 +184,16 @@ function broadcast() {
 // keyed by the item's stable id.
 async function syncMenuFromDb() {
   const { menu: dbMenu, addons: dbAddons, choices: dbChoices } = await fetchMenuFromDb();
-  const prevAvailById = new Map((state.menu || []).map((m) => [m.id, m.available]));
+  // Once menu_items carries an `available` column the DATABASE owns the on/off
+  // switch, and the value it supplies must win — re-applying the previous
+  // in-memory flag here would mask every toggle the owner makes and make the
+  // switch look broken. Until the column is added there is nowhere to store it,
+  // so the old in-memory behaviour is kept rather than resetting dishes to "on"
+  // on every sync.
+  const dbOwnsAvailable = await hasAvailableColumn();
+  const prevAvailById = dbOwnsAvailable
+    ? new Map()
+    : new Map((state.menu || []).map((m) => [m.id, m.available]));
   // The database owns every theme it actually supplies. Until the night menu is
   // imported it supplies only 'day', so the hand-curated night menu in seed.js
   // survives untouched; once night rows exist, the database takes over and the
@@ -311,6 +334,51 @@ function loginRateLimited(ip) {
   rec.count += 1;
   return rec.count > LOGIN_MAX_ATTEMPTS;
 }
+
+// --- Menu photo uploads -----------------------------------------------------
+// Accepting a file from a browser is a classic foothold, so the rules are
+// deliberately narrow:
+//
+//   * The server names every file itself (UUID + an extension derived from the
+//     allowed MIME type). A client-supplied filename is never touched, which is
+//     what makes "../../etc/passwd" a non-event rather than a path traversal.
+//   * Only the three image types the app can display are accepted.
+//   * 5 MB cap and exactly one file per request, so an upload cannot fill the
+//     disk in a single call.
+//
+// The browser already shrinks photos to <=1200px JPEG before sending (see
+// OwnerView), so a real menu photo arrives at ~200KB and the server never needs
+// an image library to process it.
+const UPLOAD_TYPES = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+};
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+    filename: (_req, file, cb) =>
+      cb(null, `${crypto.randomUUID()}${UPLOAD_TYPES[file.mimetype]}`),
+  }),
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    if (UPLOAD_TYPES[file.mimetype]) return cb(null, true);
+    cb(new Error('รองรับเฉพาะไฟล์ภาพ JPEG, PNG หรือ WebP เท่านั้น'));
+  },
+});
+
+// Serve the stored photos. `image_url` holds a root-relative path
+// (/uploads/xxx.jpg) rather than an absolute URL, so the same value works from
+// the Vite dev server (which proxies /uploads through to here) and from a
+// production deploy without a hardcoded host in the database.
+app.use('/uploads', express.static(UPLOAD_DIR, {
+  maxAge: '7d',
+  index: false,
+  // Filenames are server-generated UUIDs, so a request for anything else is
+  // someone probing — 404 immediately instead of falling through.
+  fallthrough: true,
+}));
 
 // --- Routes -----------------------------------------------------------------
 
@@ -466,6 +534,128 @@ app.post('/api/menu/refresh', requireAuth, async (_req, res) => {
   } catch (err) {
     console.error('[backend] Menu refresh from database failed:', err.message);
     res.status(502).json({ ok: false, error: err.message });
+  }
+});
+
+// Push the freshly-changed menu to every open tab right away, instead of
+// leaving the owner to wonder for up to 30s whether the edit landed.
+async function refreshMenuAndBroadcast() {
+  const { count } = await syncMenuFromDb();
+  broadcast();
+  return count;
+}
+
+// The values the owner's dropdowns offer, taken from what is already in the
+// table so a new category never has to be added in code.
+app.get('/api/menu/options', requireAuth, async (_req, res) => {
+  try {
+    res.json(await fetchMenuOptions());
+  } catch (err) {
+    console.error('[backend] Could not read menu options:', err.message);
+    res.status(502).json({ error: 'อ่านตัวเลือกจากฐานข้อมูลไม่สำเร็จ' });
+  }
+});
+
+// Store one menu photo and hand back the path to save in image_url. The reply
+// is deliberately the public path only — never the location on disk.
+app.post('/api/menu/upload', requireAuth, (req, res) => {
+  upload.single('image')(req, res, (err) => {
+    if (err) {
+      const tooBig = err.code === 'LIMIT_FILE_SIZE';
+      return res.status(400).json({
+        error: tooBig ? 'ไฟล์ใหญ่เกิน 5MB' : (err.message || 'อัปโหลดรูปไม่สำเร็จ'),
+      });
+    }
+    if (!req.file) return res.status(400).json({ error: 'ไม่พบไฟล์รูปภาพ' });
+    res.json({ url: `/uploads/${req.file.filename}` });
+  });
+});
+
+// Validate the new-dish payload. Returns { value } or { error }.
+function parseMenuItemBody(body) {
+  const str = (v) => String(v ?? '').trim();
+  const category = str(body?.category);
+  const type = str(body?.type) || 'เมนูหลัก';
+  const subcategory = str(body?.subcategory);
+  const name = str(body?.name);
+  const theme = str(body?.theme) === 'night' ? 'night' : 'day';
+  const imageUrl = str(body?.imageUrl);
+
+  if (!name) return { error: 'กรุณากรอกชื่อรายการ' };
+  if (!category) return { error: 'กรุณาเลือกหมวดหมู่' };
+  if (name.length > 200) return { error: 'ชื่อรายการยาวเกินไป' };
+
+  // Only a path we issued, or an external link of the kind the imported data
+  // already holds. Anything else (javascript:, data:) is refused rather than
+  // stored and later rendered into an <img src>.
+  if (imageUrl && !/^\/uploads\/[A-Za-z0-9-]+\.(jpg|png|webp)$/.test(imageUrl)
+      && !/^https?:\/\//i.test(imageUrl)) {
+    return { error: 'ลิงก์รูปภาพไม่ถูกต้อง' };
+  }
+
+  // No protein choices -> a single row whose เนื้อสัตว์ is "-", matching how the
+  // imported data spells "not applicable".
+  const rawVariants = Array.isArray(body?.variants) && body.variants.length
+    ? body.variants
+    : [{ meat: '-', price: body?.price }];
+
+  const variants = [];
+  for (const v of rawVariants) {
+    const meat = str(v?.meat) || '-';
+    const price = Number(v?.price);
+    if (!Number.isFinite(price) || price < 0) {
+      return { error: `ราคาของ "${meat === '-' ? name : meat}" ต้องเป็นตัวเลขตั้งแต่ 0 ขึ้นไป` };
+    }
+    variants.push({ meat, price: Math.round(price) });
+  }
+  if (variants.length > 20) return { error: 'ตัวเลือกเนื้อสัตว์มากเกินไป' };
+
+  const meats = variants.map((v) => v.meat);
+  if (new Set(meats).size !== meats.length) {
+    return { error: 'มีตัวเลือกเนื้อสัตว์ซ้ำกัน' };
+  }
+
+  return { value: { category, type, subcategory, name, theme, imageUrl, variants } };
+}
+
+// Add a dish. One row goes in per protein option, all sharing the image, which
+// is what makes the transforms fold them back into a single card with options.
+app.post('/api/menu/items', requireAuth, async (req, res) => {
+  const { value, error } = parseMenuItemBody(req.body);
+  if (error) return res.status(400).json({ error });
+
+  try {
+    if (await dishIdentityTaken(value)) {
+      return res.status(409).json({ error: 'มีเมนูชื่อนี้อยู่แล้วในหัวข้อและกะเดียวกัน' });
+    }
+    const inserted = await insertMenuItem(value);
+    const count = await refreshMenuAndBroadcast();
+    console.log(`[backend] Added menu item "${value.name}" (${inserted} row(s)); menu now ${count} items`);
+    res.json({ ok: true, rows: inserted });
+  } catch (err) {
+    console.error('[backend] Could not add menu item:', err.message);
+    res.status(502).json({ error: err.message || 'บันทึกเมนูไม่สำเร็จ' });
+  }
+});
+
+// Put a dish on or off sale. Keyed by the dish id the app already renders —
+// see setDishAvailability() for why matching on name would be unreliable.
+app.patch('/api/menu/items/availability', requireAuth, async (req, res) => {
+  const id = String(req.body?.id || '').trim();
+  const available = req.body?.available;
+  if (!id) return res.status(400).json({ error: 'ต้องระบุรหัสเมนู' });
+  if (typeof available !== 'boolean') {
+    return res.status(400).json({ error: 'ค่า available ต้องเป็น true หรือ false' });
+  }
+
+  try {
+    const updated = await setDishAvailability(id, available);
+    if (!updated) return res.status(404).json({ error: 'ไม่พบเมนูนี้ในฐานข้อมูล' });
+    await refreshMenuAndBroadcast();
+    res.json({ ok: true, rows: updated });
+  } catch (err) {
+    console.error('[backend] Could not change availability:', err.message);
+    res.status(502).json({ error: err.message || 'เปลี่ยนสถานะไม่สำเร็จ' });
   }
 });
 

@@ -3,6 +3,7 @@ import { ShoppingBag, ShoppingBasket, Trash2, X, Plus, Minus, CheckCircle } from
 import { isDrinkItem, addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
 import { mergeOrder, itemRound } from '../orders';
 import { shiftNow } from '../shift';
+import { resolveImageUrl } from '../api';
 import foodDayImg from '../assets/food.jpg';
 import foodNightImg from '../assets/food-night.png';
 import beverageDayImg from '../assets/beverage.jpg';
@@ -380,6 +381,29 @@ function CustomerView({
             ))}
           </div>
 
+          {/* HOW-TO-ORDER STEP GUIDE — สั่งอาหารง่ายๆ ใน 3 ขั้นตอน */}
+          <div className="rounded-2xl p-4 bg-card border border-line">
+            <h3 className="font-kanit font-bold text-base text-heading mb-3">สั่งอาหารง่ายๆ ใน 3 ขั้นตอน</h3>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { n: '1', icon: '📖', title: 'เลือกเมนู', desc: 'แตะรายการที่ต้องการ' },
+                { n: '2', icon: '🛒', title: 'ใส่ตะกร้า', desc: 'เลือกตัวเลือกแล้วกดใส่ตะกร้า' },
+                { n: '3', icon: '🍽️', title: 'ส่งเข้าครัว', desc: 'กดยืนยันส่งรายการ' },
+              ].map(step => (
+                <div key={step.n} className="text-center space-y-1">
+                  <div className="relative w-11 h-11 mx-auto rounded-full flex items-center justify-center text-xl bg-amber-100">
+                    <span>{step.icon}</span>
+                    <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-cta text-cta-ink text-[10px] font-bold flex items-center justify-center font-mono">
+                      {step.n}
+                    </span>
+                  </div>
+                  <p className="font-kanit font-bold text-xs text-title">{step.title}</p>
+                  <p className="text-[10px] text-ink-2 leading-tight">{step.desc}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
           {/* MENU SECTIONS */}
           {sections.length > 0 ? (
             sections.map(section => (
@@ -396,7 +420,7 @@ function CustomerView({
                   >
                     <div className={`w-[88px] h-[88px] rounded-2xl flex-shrink-0 flex items-center justify-center text-4xl overflow-hidden ${isDay ? 'bg-gradient-to-b from-well to-well-2' : 'bg-well border border-line'}`}>
                       {dish.image
-                        ? <img src={dish.image} alt="" loading="lazy" className="w-full h-full object-cover" />
+                        ? <img src={resolveImageUrl(dish.image)} alt="" loading="lazy" className="w-full h-full object-cover" />
                         : <span>{dish.emoji || '🍽️'}</span>}
                     </div>
 
@@ -475,7 +499,7 @@ function CustomerView({
       {/* DETAIL MODAL WITH CUSTOM ADDONS */}
       {selectedItem && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end justify-center p-0">
-          <div className="bg-white rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
+          <div className="surface-light bg-white rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
 
             <div className="flex justify-between items-start">
               <div>
@@ -626,7 +650,7 @@ function CustomerView({
       {/* VIEW CART OVERLAY SHEET */}
       {showCartModal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end justify-center p-0">
-          <div className="bg-white rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
+          <div className="surface-light bg-white rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
 
             <div className="flex justify-between items-center">
               <h3 className="text-base font-extrabold font-kanit flex items-center gap-2">

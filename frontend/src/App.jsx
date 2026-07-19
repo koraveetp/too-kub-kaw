@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import CustomerView from './components/CustomerView';
 import StaffView from './components/StaffView';
 import OwnerView from './components/OwnerView';
 import { fetchState, saveResource, subscribeToState, login, setAuthToken } from './api';
+import { paletteStyle } from './admin-theme';
 import { User, ShieldCheck, Key, LogOut, Sun, Moon, Smartphone } from 'lucide-react';
 import logoImg from './assets/logo.jpg';
 
@@ -78,7 +79,10 @@ const DEFAULT_SETTINGS = {
   name: 'ตู้กับข้าวบ้านยาย',
   nameNight: 'เรือนเก่า',
   tables: 12,
-  baseUrl: ''
+  baseUrl: '',
+  // Back-office colour overrides picked in ตั้งค่า, keyed by CSS variable.
+  // Empty means "use the defaults from index.css".
+  adminColors: {}
 };
 
 function App() {
@@ -145,6 +149,11 @@ function App() {
   const [loginPass, setLoginPass] = useState('');
   const [loginRemember, setLoginRemember] = useState(true);
   const [toast, setToast] = useState({ show: false, message: '' });
+  // Recomputed only when the owner actually changes a colour.
+  const adminPaletteStyle = useMemo(
+    () => paletteStyle(settings.adminColors),
+    [settings.adminColors]
+  );
   const [showPwaModal, setShowPwaModal] = useState(false);
   // Status of the very first load of shared state from the backend.
   // 'loading' -> 'ready' | 'error'. Later SSE pushes never revert this.
@@ -275,7 +284,13 @@ function App() {
   };
 
   return (
-    <div className={`min-h-screen transition-colors duration-500 flex flex-col ${theme === 'day' ? 'theme-day' : 'theme-night'}`}>
+    // The owner's colour picks ride as inline custom properties on the very
+    // element that carries .theme-day / .theme-night, so they override the
+    // stylesheet's defaults for everything inside without a global reset.
+    <div
+      className={`min-h-screen transition-colors duration-500 flex flex-col ${theme === 'day' ? 'theme-day' : 'theme-night'}`}
+      style={adminPaletteStyle}
+    >
       
       {/* GLOBAL TOAST */}
       <div className={`fixed bottom-20 left-1/2 transform -translate-x-1/2 bg-neutral-900/95 text-white text-xs px-4 py-2.5 rounded-full shadow-xl z-[200] transition-all duration-300 pointer-events-none flex items-center gap-2 ${toast.show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-4 scale-90'}`}>
@@ -312,16 +327,17 @@ function App() {
           </div>
 
           <div className="flex items-center gap-2 flex-shrink-0">
-            {/* Quick theme toggler for Customer view */}
-            {role === 'customer' && (
-              <button
-                onClick={() => setTheme(prev => prev === 'day' ? 'night' : 'day')}
-                className={`w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 shadow-sm bg-raised hover:bg-raised-hover text-raised-ink ${theme === 'day' ? '' : 'border border-line-strong'}`}
-                title="เปลี่ยนช่วงเวลา/ธีม"
-              >
-                {theme === 'day' ? <Moon className="w-5 h-5" /> : <Sun className="w-4 h-4" />}
-              </button>
-            )}
+            {/* Quick theme toggler. Available in every role, not just the
+                customer view: the staff and owner panels follow the same
+                day/night palette, so anyone working a night shift can drop the
+                whole app into the dark theme. */}
+            <button
+              onClick={() => setTheme(prev => prev === 'day' ? 'night' : 'day')}
+              className={`w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 shadow-sm bg-raised hover:bg-raised-hover text-raised-ink ${theme === 'day' ? '' : 'border border-line-strong'}`}
+              title="เปลี่ยนช่วงเวลา/ธีม"
+            >
+              {theme === 'day' ? <Moon className="w-5 h-5" /> : <Sun className="w-4 h-4" />}
+            </button>
 
             {/* Role Switcher Selector */}
             <div className="relative">
@@ -338,21 +354,21 @@ function App() {
               {showRoleDropdown && (
                 <>
                   <div className="fixed inset-0 z-40" onClick={() => setShowRoleDropdown(false)} />
-                  <div className={`absolute right-0 mt-1.5 w-52 border rounded-2xl shadow-2xl z-50 overflow-hidden animate-slide-up text-xs font-thai text-neutral-800 bg-white border-neutral-100`}>
+                  <div className={`absolute right-0 mt-1.5 w-52 border rounded-2xl shadow-2xl z-50 overflow-hidden animate-slide-up text-xs font-thai text-neutral-800 bg-admin-card border-neutral-100`}>
                     <div className="p-2.5 border-b bg-neutral-50 font-bold text-neutral-400 text-[10px] uppercase">
                       จำลองสแกน / สิทธิ์ระบบ
                     </div>
                     
                     <button 
                       onClick={() => switchRole('customer', 'day', 1)}
-                      className="w-full text-left px-3.5 py-2 hover:bg-amber-50 flex items-center justify-between border-b border-neutral-50"
+                      className="w-full text-left px-3.5 py-2 hover:bg-amber-500/10 flex items-center justify-between border-b border-neutral-50"
                     >
                       <span className="font-semibold text-neutral-700">🍽️ ลูกค้ากลางวัน โต๊ะ 1</span>
                       <span className="text-[9px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded-full font-bold">ตามสั่ง</span>
                     </button>
                     <button 
                       onClick={() => switchRole('customer', 'day', 5)}
-                      className="w-full text-left px-3.5 py-2 hover:bg-amber-50 flex items-center justify-between border-b border-neutral-50"
+                      className="w-full text-left px-3.5 py-2 hover:bg-amber-500/10 flex items-center justify-between border-b border-neutral-50"
                     >
                       <span className="font-semibold text-neutral-700">🍽️ ลูกค้ากลางวัน โต๊ะ 5</span>
                       <span className="text-[9px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded-full font-bold">ตามสั่ง</span>
@@ -514,9 +530,9 @@ function App() {
       {/* LOGIN MODAL */}
       {showLoginModal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-fade">
-          <div className="bg-white rounded-2xl max-w-sm w-full p-6 text-neutral-800 space-y-4 border border-neutral-100 shadow-2xl">
+          <div className="bg-admin-card rounded-2xl max-w-sm w-full p-6 text-neutral-800 space-y-4 border border-neutral-100 shadow-2xl">
             <div className="text-center">
-              <span className="w-12 h-12 bg-amber-50 text-amber-600 rounded-full flex items-center justify-center mx-auto mb-2 text-xl">👩‍🍳</span>
+              <span className="w-12 h-12 bg-amber-500/10 text-amber-600 dark:text-amber-300 rounded-full flex items-center justify-center mx-auto mb-2 text-xl">👩‍🍳</span>
               <h3 className="font-extrabold text-base font-kanit">เข้าสู่ระบบพนักงาน</h3>
               <p className="text-xs text-neutral-400 font-thai">เพื่อเปิดบอร์ดรับออเดอร์ จัดการหลังบ้าน หรือตรวจสอบคลัง</p>
             </div>
@@ -528,7 +544,7 @@ function App() {
                   type="text" 
                   value={loginUser}
                   onChange={e => setLoginUser(e.target.value)}
-                  className="w-full border rounded-xl p-3 focus:ring-2 focus:ring-amber-500 focus:outline-none text-xs" 
+                  className="w-full border rounded-xl p-3 bg-admin-field focus:ring-2 focus:ring-amber-500 focus:outline-none text-xs"
                   placeholder="เช่น admin" 
                   required
                 />
@@ -539,7 +555,7 @@ function App() {
                   type="password" 
                   value={loginPass}
                   onChange={e => setLoginPass(e.target.value)}
-                  className="w-full border rounded-xl p-3 focus:ring-2 focus:ring-amber-500 focus:outline-none text-xs" 
+                  className="w-full border rounded-xl p-3 bg-admin-field focus:ring-2 focus:ring-amber-500 focus:outline-none text-xs"
                   placeholder="รหัสผ่าน" 
                   required
                 />
@@ -571,7 +587,7 @@ function App() {
                 </button>
               </div>
             </form>
-            <div className="bg-amber-50 p-2.5 rounded-xl text-[10px] font-thai text-amber-800 leading-tight">
+            <div className="bg-amber-500/10 p-2.5 rounded-xl text-[10px] font-thai text-amber-800 dark:text-amber-200 leading-tight">
               💡 บัญชีทดลอง: ผู้ใช้ <b className="font-bold">admin</b> / รหัสผ่าน <b className="font-bold">1234</b> (สามารถปรับปรุงได้ในหลังบ้านบอร์ดตั้งค่า)
             </div>
           </div>
@@ -581,8 +597,8 @@ function App() {
       {/* PWA MOCKUP MODAL */}
       {showPwaModal && (
         <div className="fixed inset-0 bg-black/75 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-xs w-full p-6 text-center space-y-4 text-neutral-800 shadow-2xl">
-            <div className="mx-auto w-14 h-14 bg-amber-50 rounded-2xl flex items-center justify-center text-amber-600 shadow-inner">
+          <div className="bg-admin-card rounded-2xl max-w-xs w-full p-6 text-center space-y-4 text-neutral-800 shadow-2xl">
+            <div className="mx-auto w-14 h-14 bg-amber-500/10 rounded-2xl flex items-center justify-center text-amber-600 dark:text-amber-300 shadow-inner">
               <Smartphone className="w-8 h-8" />
             </div>
             <div>
