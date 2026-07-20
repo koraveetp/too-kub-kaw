@@ -4,6 +4,7 @@ import {
   fetchMenuOptions,
   uploadMenuImage,
   createMenuItem,
+  createStockItem,
   setMenuAvailability,
   resolveImageUrl,
 } from '../api';
@@ -34,6 +35,7 @@ const EMPTY_FORM = {
   subcategory: '',
   name: '',
   price: '',
+  quantity: '',
   imageUrl: '',
 };
 
@@ -104,6 +106,10 @@ function OwnerMenu({ menu, showToast }) {
   const [pending, setPending] = useState(() => new Set());
 
   const [showForm, setShowForm] = useState(false);
+  // 'menu' = add a dish only. 'stock' = add the dish AND file it in คลังวัตถุดิบ.
+  // Both use the exact same form; stock mode just reveals a quantity field and
+  // writes an inventory row on submit.
+  const [formMode, setFormMode] = useState('menu');
   const [form, setForm] = useState(EMPTY_FORM);
   const [formTheme, setFormTheme] = useState('day');
   const [variants, setVariants] = useState([]);
@@ -231,6 +237,15 @@ function OwnerMenu({ menu, showToast }) {
       return showToast('กรุณากรอกราคาของทุกตัวเลือกให้ถูกต้อง');
     }
 
+    // Stock mode also needs a starting quantity for the inventory row.
+    let quantity = 0;
+    if (formMode === 'stock') {
+      quantity = Number(form.quantity);
+      if (!Number.isInteger(quantity) || quantity < 0) {
+        return showToast('กรุณากรอกจำนวนในคลังเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
+      }
+    }
+
     setSaving(true);
     try {
       await createMenuItem({
@@ -244,7 +259,25 @@ function OwnerMenu({ menu, showToast }) {
           ? filled.map((v) => ({ meat: v.meat.trim(), price: Number(v.price) }))
           : [{ meat: '-', price: Number(form.price) }],
       });
-      showToast(`เพิ่มเมนู [${form.name.trim()}] เรียบร้อย`);
+
+      // In stock mode, file the same item in คลังวัตถุดิบ. Keep the menu success
+      // even if the stock write fails — just tell the owner about it.
+      let stockMsg = ' เรียบร้อย';
+      if (formMode === 'stock') {
+        try {
+          const item = await createStockItem({
+            category: form.category.trim(),
+            name: form.name.trim(),
+            quantity,
+            imageUrl: form.imageUrl,
+          });
+          stockMsg = ` และบันทึกลงคลังแล้ว (คงเหลือ ${item.quantity})`;
+        } catch (stockErr) {
+          stockMsg = ` แต่บันทึกลงคลังไม่สำเร็จ: ${stockErr.message}`;
+        }
+      }
+
+      showToast(`เพิ่มเมนู [${form.name.trim()}]${stockMsg}`);
       resetForm();
       setShowForm(false);
       // Show the shift the dish was filed under, so it is on screen.
@@ -273,22 +306,31 @@ function OwnerMenu({ menu, showToast }) {
         ))}
       </div>
 
-      {/* ADD BUTTON / FORM */}
+      {/* ADD BUTTONS / FORM */}
       {!showForm ? (
-        <button
-          onClick={() => { setShowForm(true); setFormTheme(theme); }}
-          className="w-full bg-admin-cta hover:bg-admin-cta-hover text-admin-cta-ink font-bold py-3 rounded-2xl transition font-kanit flex items-center justify-center gap-2 text-xs"
-        >
-          <Plus className="w-4 h-4" />
-          เพิ่มเมนูใหม่
-        </button>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => { setShowForm(true); setFormMode('menu'); setFormTheme(theme); }}
+            className="bg-admin-cta hover:bg-admin-cta-hover text-admin-cta-ink font-bold py-3 rounded-2xl transition font-kanit flex items-center justify-center gap-2 text-xs"
+          >
+            <Plus className="w-4 h-4" />
+            เพิ่มเมนูใหม่
+          </button>
+          <button
+            onClick={() => { setShowForm(true); setFormMode('stock'); setFormTheme(theme); }}
+            className="bg-ctl hover:bg-ctl-hover text-ctl-ink font-bold py-3 rounded-2xl transition font-kanit flex items-center justify-center gap-2 text-xs"
+          >
+            <Plus className="w-4 h-4" />
+            อัพเดทสตอก
+          </button>
+        </div>
       ) : (
         <form
           onSubmit={handleSubmit}
           className="bg-admin-panel border border-line rounded-2xl p-4 space-y-3 text-xs font-thai"
         >
           <div className="flex justify-between items-baseline">
-            <h3 className="font-extrabold text-base font-kanit text-neutral-800">เพิ่มเมนูใหม่</h3>
+            <h3 className="font-extrabold text-base font-kanit text-neutral-800">{formMode === 'stock' ? 'อัพเดทสตอก' : 'เพิ่มเมนูใหม่'}</h3>
             <button
               type="button"
               onClick={() => { setShowForm(false); resetForm(); }}
@@ -367,6 +409,26 @@ function OwnerMenu({ menu, showToast }) {
                 required
                 className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono font-bold"
               />
+            </div>
+          )}
+
+          {/* STOCK QUANTITY — only in อัพเดทสตอก mode */}
+          {formMode === 'stock' && (
+            <div>
+              <label className="block font-bold text-neutral-500 mb-1">จำนวนในคลัง (เริ่มต้น)</label>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={form.quantity}
+                onChange={(e) => setForm((f) => ({ ...f, quantity: e.target.value }))}
+                placeholder="เช่น 50"
+                required
+                className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono font-bold"
+              />
+              <p className="text-[10px] text-neutral-400 font-medium mt-1">
+                จะบันทึกลงคลังวัตถุดิบด้วย ชื่อตรงกับเมนูเพื่อให้หน้าลูกค้าซ่อนอัตโนมัติเมื่อของหมด
+              </p>
             </div>
           )}
 
@@ -488,7 +550,7 @@ function OwnerMenu({ menu, showToast }) {
             className="w-full bg-admin-cta hover:bg-admin-cta-hover text-admin-cta-ink font-bold py-3 rounded-2xl transition font-kanit disabled:opacity-50 flex items-center justify-center gap-2"
           >
             {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-            {saving ? 'กำลังบันทึก…' : 'บันทึกเมนูใหม่'}
+            {saving ? 'กำลังบันทึก…' : (formMode === 'stock' ? 'บันทึกเมนู + คลัง' : 'บันทึกเมนูใหม่')}
           </button>
         </form>
       )}

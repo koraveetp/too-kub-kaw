@@ -118,6 +118,56 @@ export function setMenuAvailability(id, available) {
   });
 }
 
+// --- Stock (คลังวัตถุดิบ) ----------------------------------------------------
+// The staff inventory tab reads/writes the `stock_items` table via these. They
+// require a staff session, like the menu-management calls above.
+
+// The whole inventory: [{ id, category, name, quantity, imageUrl }].
+export async function fetchStockItems() {
+  const { items } = await authedJson('/api/stock-items');
+  return items;
+}
+
+// Adjust one item by delta (+1 / +10 / -1 ...). Returns the updated item.
+export async function adjustStockItem(id, delta) {
+  const { item } = await authedJson(`/api/stock-items/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ delta }),
+  });
+  return item;
+}
+
+// Public stock levels for the customer storefront (no auth). Returns
+// [{ name, quantity }] so the menu can grey out a dish whose stock hit 0.
+export async function fetchStockAvailability() {
+  const res = await fetch('/api/stock-availability');
+  if (!res.ok) return [];
+  const { items } = await res.json();
+  return items || [];
+}
+
+// Create a stock item (or top up one with the same name). Returns the resulting
+// row. Used by the owner's "อัพเดทสตอก" action. Staff session required.
+export async function createStockItem({ category, name, quantity, imageUrl }) {
+  const { item } = await authedJson('/api/stock-items', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ category, name, quantity, imageUrl }),
+  });
+  return item;
+}
+
+// Bump every item by delta ("เติมทั้งหมด"). Returns how many rows changed.
+export async function restockAllStock(delta) {
+  const { changed } = await authedJson('/api/stock-items/restock', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ delta }),
+  });
+  return changed;
+}
+
 // Resolve a stored image value into something an <img src> can use.
 //
 // Two shapes live in image_url side by side: the external links the menu was

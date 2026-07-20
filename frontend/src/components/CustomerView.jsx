@@ -1,9 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { ShoppingBag, ShoppingBasket, Trash2, X, Plus, Minus, CheckCircle } from 'lucide-react';
 import { isDrinkItem, addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
 import { mergeOrder, itemRound } from '../orders';
 import { shiftNow } from '../shift';
-import { resolveImageUrl } from '../api';
+import { resolveImageUrl, fetchStockAvailability } from '../api';
+
+// Normalise a name for stock↔menu matching: trim, collapse inner whitespace,
+// lowercase. Thai has no case but this keeps mixed Thai/English names in step.
+const normName = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
 import foodDayImg from '../assets/food.jpg';
 import foodNightImg from '../assets/food-night.png';
 import beverageDayImg from '../assets/beverage.jpg';
@@ -55,6 +59,43 @@ function CustomerView({
 
   const isDay = theme === 'day';
 
+  // Live stock levels from the คลังวัตถุดิบ (stock_items) table. Public read, so
+  // the customer tab can grey out a sold-out dish. Refreshed on mount and every
+  // 45s (staff top-ups/deductions land within that window). Fails open: on any
+  // error this stays empty and nothing gets hidden.
+  const [stockLevels, setStockLevels] = useState([]);
+  useEffect(() => {
+    let alive = true;
+    const load = () => fetchStockAvailability()
+      .then(items => { if (alive) setStockLevels(items); })
+      .catch(() => {});
+    load();
+    const timer = setInterval(load, 45000);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
+
+  // Map of normalised name -> remaining quantity, merged from the drink `stock`
+  // object and the stock_items table. When a name shows up in both, the smaller
+  // count wins (safer). A dish is "sold out" when its name matches an entry here
+  // whose quantity is 0 or less; unmatched dishes are unaffected.
+  const soldOutNames = useMemo(() => {
+    const qty = new Map();
+    const put = (name, count) => {
+      const key = normName(name);
+      if (!key || typeof count !== 'number') return;
+      qty.set(key, qty.has(key) ? Math.min(qty.get(key), count) : count);
+    };
+    Object.values(stock || {}).forEach(s => put(s.name, s.count));
+    (stockLevels || []).forEach(s => put(s.name, s.quantity));
+    const out = new Set();
+    qty.forEach((count, key) => { if (count <= 0) out.add(key); });
+    return out;
+  }, [stock, stockLevels]);
+
+  // A dish is orderable only if the owner marked it available AND its linked
+  // stock (matched by name) has not run dry.
+  const isAvailable = (dish) => dish.available && !soldOutNames.has(normName(dish.name));
+
   // Filter menu items for current theme
   const filteredMenu = menu.filter(item => item.theme === theme);
 
@@ -82,7 +123,7 @@ function CustomerView({
   const cartTotal = cart.reduce((sum, item) => sum + (item.price + item.addonCost) * item.qty, 0);
 
   const handleOpenDetail = (item) => {
-    if (!item.available) return;
+    if (!isAvailable(item)) return;
     setSelectedItem(item);
     // Default to the first protein option (if the dish has any).
     setSelectedOption(item.options && item.options.length ? item.options[0] : null);
@@ -412,11 +453,13 @@ function CustomerView({
                   {section.category}
                 </h2>
 
-                {section.items.map(dish => (
+                {section.items.map(dish => {
+                  const available = isAvailable(dish);
+                  return (
                   <div
                     key={dish.id}
                     onClick={() => handleOpenDetail(dish)}
-                    className={`rounded-3xl p-3.5 flex items-center gap-3.5 transition duration-300 bg-card hover:bg-card-hover ${dish.available ? 'cursor-pointer active:scale-[0.99]' : 'opacity-55'} ${isDay ? 'shadow-[0_6px_20px_-8px_rgba(90,46,20,0.28)] hover:shadow-[0_10px_26px_-8px_rgba(90,46,20,0.35)]' : 'border border-line shadow-[0_6px_20px_-10px_rgba(0,0,0,0.8)]'}`}
+                    className={`rounded-3xl p-3.5 flex items-center gap-3.5 transition duration-300 bg-card hover:bg-card-hover ${available ? 'cursor-pointer active:scale-[0.99]' : 'opacity-55'} ${isDay ? 'shadow-[0_6px_20px_-8px_rgba(90,46,20,0.28)] hover:shadow-[0_10px_26px_-8px_rgba(90,46,20,0.35)]' : 'border border-line shadow-[0_6px_20px_-10px_rgba(0,0,0,0.8)]'}`}
                   >
                     <div className={`w-[88px] h-[88px] rounded-2xl flex-shrink-0 flex items-center justify-center text-4xl overflow-hidden ${isDay ? 'bg-gradient-to-b from-well to-well-2' : 'bg-well border border-line'}`}>
                       {dish.image
@@ -435,7 +478,7 @@ function CustomerView({
                         <span className="font-kanit font-bold text-lg text-accent">
                           {dish.price}.-
                         </span>
-                        {!dish.available && (
+                        {!available && (
                           <span className="text-[10px] text-red-600 bg-red-100 px-2 py-0.5 rounded-full font-semibold">
                             หมดชั่วคราว
                           </span>
@@ -443,13 +486,14 @@ function CustomerView({
                       </div>
                     </div>
 
-                    {dish.available && (
+                    {available && (
                       <span className="w-14 h-14 rounded-full flex-shrink-0 flex items-center justify-center shadow-md transition bg-add hover:bg-add-hover text-add-ink">
                         <ShoppingBasket className="w-6 h-6" />
                       </span>
                     )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             ))
           ) : (

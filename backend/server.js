@@ -44,6 +44,7 @@ import {
   hasAvailableColumn,
 } from './menu-db.js';
 import { ensureOrdersTable, loadOrders, saveOrders } from './orders-db.js';
+import { fetchStockItems, fetchStockAvailability, createStockItem, adjustStockItem, restockAll } from './stock-db.js';
 import { hashPassword, verifyPassword, isHashed, signToken, verifyToken } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -656,6 +657,82 @@ app.patch('/api/menu/items/availability', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[backend] Could not change availability:', err.message);
     res.status(502).json({ error: err.message || 'เปลี่ยนสถานะไม่สำเร็จ' });
+  }
+});
+
+// --- Stock (คลังวัตถุดิบ) ----------------------------------------------------
+// The staff inventory tab reads and edits the `stock_items` table directly.
+// Separate from the in-memory drink `stock` used when taking an order.
+
+// The whole inventory.
+app.get('/api/stock-items', requireAuth, async (_req, res) => {
+  try {
+    res.json({ items: await fetchStockItems() });
+  } catch (err) {
+    console.error('[backend] Could not read stock_items:', err.message);
+    res.status(502).json({ error: 'อ่านคลังวัตถุดิบจากฐานข้อมูลไม่สำเร็จ' });
+  }
+});
+
+// Create a stock item (or top up an existing one with the same name). Backs the
+// owner's "อัพเดทสตอก" action, which adds a dish and its inventory row at once.
+app.post('/api/stock-items', requireAuth, async (req, res) => {
+  const category = String(req.body?.category || '').trim() || 'ทั่วไป';
+  const name = String(req.body?.name || '').trim();
+  const quantity = Number(req.body?.quantity);
+  const imageUrl = String(req.body?.imageUrl || '').trim();
+  if (!name) return res.status(400).json({ error: 'ต้องระบุชื่อรายการ' });
+  if (!Number.isInteger(quantity) || quantity < 0) {
+    return res.status(400).json({ error: 'จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป' });
+  }
+  try {
+    const item = await createStockItem({ category, name, quantity, imageUrl });
+    res.json({ ok: true, item });
+  } catch (err) {
+    console.error('[backend] Could not create stock item:', err.message);
+    res.status(502).json({ error: 'เพิ่มรายการในคลังไม่สำเร็จ' });
+  }
+});
+
+// Public, read-only stock levels for the customer storefront (no auth). Returns
+// [{ name, quantity }] so CustomerView can grey out a dish whose linked stock
+// has hit 0. If the DB is unreachable we return an empty list rather than an
+// error, so the menu still shows (fails open — never hides food on a DB hiccup).
+app.get('/api/stock-availability', async (_req, res) => {
+  try {
+    res.json({ items: await fetchStockAvailability() });
+  } catch (err) {
+    console.error('[backend] Could not read stock availability:', err.message);
+    res.json({ items: [] });
+  }
+});
+
+// Adjust one item's quantity by { delta } (e.g. +1 / +10). Never below 0.
+app.patch('/api/stock-items/:id', requireAuth, async (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  const delta = Number(req.body?.delta);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'รหัสสินค้าไม่ถูกต้อง' });
+  if (!Number.isFinite(delta)) return res.status(400).json({ error: 'ค่า delta ต้องเป็นตัวเลข' });
+  try {
+    const item = await adjustStockItem(id, delta);
+    if (!item) return res.status(404).json({ error: 'ไม่พบสินค้านี้ในคลัง' });
+    res.json({ ok: true, item });
+  } catch (err) {
+    console.error('[backend] Could not adjust stock item:', err.message);
+    res.status(502).json({ error: 'ปรับจำนวนคลังไม่สำเร็จ' });
+  }
+});
+
+// Bump every item by { delta } (the "เติมทั้งหมด" buttons).
+app.post('/api/stock-items/restock', requireAuth, async (req, res) => {
+  const delta = Number(req.body?.delta);
+  if (!Number.isFinite(delta)) return res.status(400).json({ error: 'ค่า delta ต้องเป็นตัวเลข' });
+  try {
+    const changed = await restockAll(delta);
+    res.json({ ok: true, changed });
+  } catch (err) {
+    console.error('[backend] Could not restock all:', err.message);
+    res.status(502).json({ error: 'เติมสต็อกทั้งหมดไม่สำเร็จ' });
   }
 });
 

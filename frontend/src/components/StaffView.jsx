@@ -3,6 +3,7 @@ import { addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-grou
 import { shiftNow, orderShift } from '../shift';
 import { generateInvoiceNo } from '../invoice';
 import { mergeOrder, itemRound } from '../orders';
+import { fetchStockItems, adjustStockItem, restockAllStock, resolveImageUrl } from '../api';
 import {
   ClipboardList,
   LayoutGrid,
@@ -35,6 +36,11 @@ function StaffView({
   choices
 }) {
   const [subTab, setSubTab] = useState('orders'); // orders, take-order, tables, stock, qrcode
+  // คลังวัตถุดิบ tab: read from the SQL `stock_items` table (not the mockup
+  // drink `stock` used when taking an order). Loaded when the tab is opened.
+  const [stockItems, setStockItems] = useState([]);
+  const [stockLoading, setStockLoading] = useState(false);
+  const [stockError, setStockError] = useState('');
   const [orderFilter, setOrderFilter] = useState('active'); // active, new, cooking, served, paid, all
   // Which shift's orders the board shows + notifies for. Defaults to the shift
   // the wall clock is in right now, so staff see the shift they're working.
@@ -510,24 +516,47 @@ function StaffView({
     showToast(`เช็คบิล โต๊ะ ${table} เรียบร้อยแล้ว โต๊ะพร้อมรับลูกค้าใหม่`);
   };
 
-  // Restock every item of the current shift (day ingredients vs night drinks).
-  const handleRestock = (amount) => {
-    const updated = { ...stock };
-    Object.keys(updated).forEach(k => {
-      if (updated[k].theme === theme) {
-        updated[k] = { ...updated[k], count: updated[k].count + amount };
-      }
-    });
-    setStock(updated);
-    showToast(`เติมสต็อก${isDay ? 'วัตถุดิบ' : 'เครื่องดื่ม'}ทั้งหมด +${amount} เรียบร้อย`);
+  // --- คลังวัตถุดิบ (SQL stock_items) ---------------------------------------
+  // Load the inventory from the database whenever the tab is opened.
+  const loadStockItems = async () => {
+    setStockLoading(true);
+    setStockError('');
+    try {
+      setStockItems(await fetchStockItems());
+    } catch (err) {
+      setStockError(err.message || 'โหลดคลังวัตถุดิบไม่สำเร็จ');
+    } finally {
+      setStockLoading(false);
+    }
   };
 
-  // Add stock to a single item.
-  const adjustStock = (key, amount) => {
-    const item = stock[key];
-    if (!item) return;
-    setStock({ ...stock, [key]: { ...item, count: item.count + amount } });
-    showToast(`${item.name} +${amount} (คงเหลือ ${item.count + amount})`);
+  useEffect(() => {
+    if (subTab === 'stock') loadStockItems();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subTab]);
+
+  // Add `amount` to one item, persisting to the database. Updates the row in
+  // place from the server's returned quantity (kept accurate even if two staff
+  // edit at once).
+  const adjustStockItemQty = async (id, amount) => {
+    try {
+      const updated = await adjustStockItem(id, amount);
+      setStockItems((prev) => prev.map((it) => (it.id === id ? updated : it)));
+      showToast(`${updated.name} +${amount} (คงเหลือ ${updated.quantity})`);
+    } catch (err) {
+      showToast(err.message || 'ปรับจำนวนคลังไม่สำเร็จ');
+    }
+  };
+
+  // Bump every item in the database, then reload to reflect the new totals.
+  const handleRestockAll = async (amount) => {
+    try {
+      await restockAllStock(amount);
+      await loadStockItems();
+      showToast(`เติมสต็อกทั้งหมด +${amount} เรียบร้อย`);
+    } catch (err) {
+      showToast(err.message || 'เติมสต็อกทั้งหมดไม่สำเร็จ');
+    }
   };
 
   // Helper: check table status. Occupancy is shift-agnostic — the table is busy
@@ -840,22 +869,30 @@ function StaffView({
           </div>
         );
 
-      case 'stock':
+      case 'stock': {
+        // Warn when an item drops to this many units or fewer (stock_items has
+        // no per-item threshold column, so one shared level is used).
+        const LOW_STOCK = 5;
+        // Group the flat inventory by category for readable section headers.
+        const grouped = stockItems.reduce((acc, it) => {
+          (acc[it.category] = acc[it.category] || []).push(it);
+          return acc;
+        }, {});
         return (
           <div className="space-y-4">
             <div className="flex justify-between items-center">
-              <h2 className="font-extrabold text-sm font-kanit uppercase tracking-wider text-neutral-400">{isDay ? 'คลังวัตถุดิบครัวกลางวัน' : 'คลังค็อกเทล & สปิริต บาร์'}</h2>
+              <h2 className="font-extrabold text-sm font-kanit uppercase tracking-wider text-neutral-400">คลังวัตถุดิบ</h2>
               <div className="flex items-center gap-1.5">
                 <span className="text-[10px] text-neutral-400 font-bold hidden sm:block">เติมทั้งหมด:</span>
                 <button
-                  onClick={() => handleRestock(1)}
+                  onClick={() => handleRestockAll(1)}
                   className="flex items-center gap-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 border font-bold py-1.5 px-3 rounded-xl text-xs transition"
                 >
                   <PlusCircle className="w-3.5 h-3.5" />
                   <span>+1</span>
                 </button>
                 <button
-                  onClick={() => handleRestock(10)}
+                  onClick={() => handleRestockAll(10)}
                   className="flex items-center gap-1 bg-ctl hover:bg-ctl-hover text-ctl-ink font-bold py-1.5 px-3 rounded-xl text-xs transition"
                 >
                   <PlusCircle className="w-3.5 h-3.5" />
@@ -864,54 +901,82 @@ function StaffView({
               </div>
             </div>
 
-            <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs divide-y divide-neutral-100">
-              {Object.keys(stock).filter(key => stock[key].theme === theme).map(key => {
-                const item = stock[key];
-                const isLow = item.count <= item.min;
-                return (
-                  <div key={key} className="p-3.5 flex justify-between items-center text-xs font-thai">
-                    <div className="space-y-0.5">
-                      <span className="font-bold text-neutral-800 block">{item.name}</span>
-                      <span className="text-[10px] text-neutral-400 font-mono">รหัสสินค้า: {key} &bull; สต็อกเตือนต่ำกว่า: {item.min}</span>
-                    </div>
+            {stockLoading && (
+              <div className="p-6 text-center text-xs text-neutral-400 font-thai">กำลังโหลดคลังวัตถุดิบ…</div>
+            )}
+            {stockError && !stockLoading && (
+              <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-2xl text-xs font-thai flex items-center justify-between gap-3">
+                <span>{stockError}</span>
+                <button onClick={loadStockItems} className="font-bold underline shrink-0">ลองใหม่</button>
+              </div>
+            )}
+            {!stockLoading && !stockError && stockItems.length === 0 && (
+              <div className="p-6 text-center text-xs text-neutral-400 font-thai">ยังไม่มีข้อมูลในตาราง stock_items</div>
+            )}
 
-                    <div className="flex items-center gap-3">
-                      {isLow && (
-                        <span className="flex items-center gap-1 text-[9px] bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-bold">
-                          <AlertTriangle className="w-3 h-3" />
-                          <span>ของใกล้หมด</span>
-                        </span>
-                      )}
-                      
-                      <div className="font-mono text-right">
-                        <span className={`text-base font-extrabold block ${isLow ? 'text-red-600' : 'text-neutral-800'}`}>
-                          {item.count}
-                        </span>
-                        <span className="text-[9px] text-neutral-400">หน่วยคงเหลือ</span>
-                      </div>
+            {!stockLoading && !stockError && Object.keys(grouped).map((category) => (
+              <div key={category} className="space-y-1.5">
+                <h3 className="text-[11px] font-extrabold text-neutral-500 font-thai px-1">{category}</h3>
+                <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs divide-y divide-neutral-100">
+                  {grouped[category].map((item) => {
+                    const isLow = item.quantity <= LOW_STOCK;
+                    const img = resolveImageUrl(item.imageUrl);
+                    return (
+                      <div key={item.id} className="p-3.5 flex justify-between items-center text-xs font-thai">
+                        <div className="flex items-center gap-3 min-w-0">
+                          {img && (
+                            <img src={img} alt="" className="w-10 h-10 rounded-lg object-cover border shrink-0" loading="lazy" />
+                          )}
+                          <span className="font-bold text-neutral-800 truncate text-sm">{item.name}</span>
+                        </div>
 
-                      {/* Per-item quick add */}
-                      <div className="flex flex-col gap-1">
-                        <button
-                          onClick={() => adjustStock(key, 1)}
-                          className="bg-neutral-100 hover:bg-neutral-200 text-neutral-700 border font-bold px-2 py-0.5 rounded-lg text-[10px] transition"
-                        >
-                          +1
-                        </button>
-                        <button
-                          onClick={() => adjustStock(key, 10)}
-                          className="bg-ctl hover:bg-ctl-hover text-ctl-ink font-bold px-2 py-0.5 rounded-lg text-[10px] transition"
-                        >
-                          +10
-                        </button>
+                        <div className="flex items-center gap-3 shrink-0">
+                          {isLow && (
+                            <span className="flex items-center gap-1 text-[9px] bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-bold">
+                              <AlertTriangle className="w-3 h-3" />
+                              <span>ของใกล้หมด</span>
+                            </span>
+                          )}
+
+                          <div className="font-mono text-right">
+                            <span className={`text-base font-extrabold block ${isLow ? 'text-red-600' : 'text-neutral-800'}`}>
+                              {item.quantity}
+                            </span>
+                            <span className="text-[9px] text-neutral-400">หน่วยคงเหลือ</span>
+                          </div>
+
+                          {/* Per-item quick add (persists to stock_items) */}
+                          <div className="flex flex-col gap-1">
+                            <button
+                              onClick={() => adjustStockItemQty(item.id, 1)}
+                              className="bg-neutral-100 hover:bg-neutral-200 text-neutral-700 border font-bold px-2 py-0.5 rounded-lg text-[10px] transition"
+                            >
+                              +1
+                            </button>
+                            <button
+                              onClick={() => adjustStockItemQty(item.id, 10)}
+                              className="bg-ctl hover:bg-ctl-hover text-ctl-ink font-bold px-2 py-0.5 rounded-lg text-[10px] transition"
+                            >
+                              +10
+                            </button>
+                            <button
+                              onClick={() => adjustStockItemQty(item.id, -1)}
+                              disabled={item.quantity <= 0}
+                              className="bg-red-100 hover:bg-red-200 text-red-700 border border-red-200 font-bold px-2 py-0.5 rounded-lg text-[10px] transition disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              -1
+                            </button>
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
           </div>
         );
+      }
 
       case 'qrcode':
         const urlToPrint = settings.baseUrl || window.location.origin + window.location.pathname;
