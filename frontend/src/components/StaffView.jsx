@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
-import { shiftNow, orderShift } from '../shift';
+import { orderShift } from '../shift';
 import { generateInvoiceNo } from '../invoice';
 import { mergeOrder, itemRound } from '../orders';
 import { fetchStockItems, adjustStockItem, restockAllStock, resolveImageUrl } from '../api';
@@ -42,9 +42,9 @@ function StaffView({
   const [stockLoading, setStockLoading] = useState(false);
   const [stockError, setStockError] = useState('');
   const [orderFilter, setOrderFilter] = useState('active'); // active, new, cooking, served, paid, all
-  // Which shift's orders the board shows + notifies for. Defaults to the shift
-  // the wall clock is in right now, so staff see the shift they're working.
-  const [shiftView, setShiftView] = useState(() => shiftNow());
+  // Which shift's orders the board shows + notifies for. Defaults to the active
+  // menu/theme, so staff see the shift matching the menu currently being served.
+  const [shiftView, setShiftView] = useState(theme);
   
   // Direct ordering states
   const [targetTable, setTargetTable] = useState('1');
@@ -376,8 +376,9 @@ function StaffView({
       no: orderNo,
       time: new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }),
       createdAt: Date.now(),
-      // Shift is stamped from the wall clock at creation, not the active theme.
-      type: shiftNow(),
+      // Shift is stamped from the active menu/theme, so the order lands on the
+      // matching day/night board regardless of the wall clock.
+      type: theme,
       table: targetTable,
       items: takeOrderCart.map(item => ({
         name: item.name,

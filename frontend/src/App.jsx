@@ -4,7 +4,7 @@ import StaffView from './components/StaffView';
 import OwnerView from './components/OwnerView';
 import { fetchState, saveResource, subscribeToState, login, setAuthToken } from './api';
 import { paletteStyle } from './admin-theme';
-import { User, ShieldCheck, Key, LogOut, Sun, Moon, Smartphone } from 'lucide-react';
+import { User, ShieldCheck, Key, LogOut, Sun, Moon, Smartphone, Languages } from 'lucide-react';
 import logoImg from './assets/logo.jpg';
 
 const DEFAULT_MENU = [
@@ -89,6 +89,10 @@ function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem('activeTheme') || 'day');
   const [role, setRole] = useState(() => localStorage.getItem('currentRole') || 'customer');
   const [tableNo, setTableNo] = useState(() => parseInt(localStorage.getItem('tableNo') || '1'));
+  // Customer-facing menu language ('th' | 'en'). Only the customer view reads
+  // it; staff and owner panels stay Thai. Persisted so a foreign diner's choice
+  // survives a page reload.
+  const [lang, setLang] = useState(() => localStorage.getItem('lang') || 'th');
   // --- SHARED STATE (lives on the backend, cached here) --------------------
   // These are seeded with local defaults only for the first render; the real
   // values arrive from the backend a moment later and are then kept in sync
@@ -172,6 +176,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem('tableNo', tableNo.toString());
   }, [tableNo]);
+
+  useEffect(() => {
+    localStorage.setItem('lang', lang);
+  }, [lang]);
 
   // Load the shared state from the backend once, then keep it live: the SSE
   // stream pushes the newest state whenever ANY tab changes something. This is
@@ -327,6 +335,20 @@ function App() {
           </div>
 
           <div className="flex items-center gap-2 flex-shrink-0">
+            {/* Menu language toggle — shown only to diners, since the menu is
+                the only thing translated. Flips the whole customer menu between
+                Thai and English. */}
+            {role === 'customer' && (
+              <button
+                onClick={() => setLang(prev => (prev === 'th' ? 'en' : 'th'))}
+                className={`h-10 px-3 rounded-full flex items-center justify-center gap-1 font-kanit font-bold text-sm transition-all duration-300 shadow-sm bg-raised hover:bg-raised-hover text-raised-ink ${theme === 'day' ? '' : 'border border-line-strong'}`}
+                title="เปลี่ยนภาษา / Change language"
+              >
+                <Languages className="w-4 h-4" />
+                <span>{lang === 'th' ? 'EN' : 'ไทย'}</span>
+              </button>
+            )}
+
             {/* Quick theme toggler. Available in every role, not just the
                 customer view: the staff and owner panels follow the same
                 day/night palette, so anyone working a night shift can drop the
@@ -459,9 +481,10 @@ function App() {
 
           {loadState === 'ready' && menu.length > 0 && role === 'customer' && (
             <CustomerView
-              theme={theme} 
-              tableNo={tableNo} 
-              menu={menu} 
+              theme={theme}
+              lang={lang}
+              tableNo={tableNo}
+              menu={menu}
               orders={orders}
               setOrders={setOrders}
               stock={stock}

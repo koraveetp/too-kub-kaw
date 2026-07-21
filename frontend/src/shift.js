@@ -1,10 +1,14 @@
 // ---------------------------------------------------------------------------
 // Shift helpers (day / night)
 // ---------------------------------------------------------------------------
-// An order's `type` records which *shift* it was placed in, derived from the
-// wall clock at the moment it was created — NOT from the visual theme the
-// customer happened to be browsing. This lets staff screen the order board by
-// shift and get notified only for the shift they are working.
+// An order's `type` records which *shift* it was placed in, taken from the
+// menu/theme it was ordered from — a day-menu order is 'day', a night-menu
+// order is 'night' — so a day order always shows on the day board and a night
+// order on the night board, no matter the wall clock. This lets staff screen
+// the order board by shift and get notified only for the shift they work.
+//
+// The clock helpers below are kept only as a fallback for legacy orders saved
+// before `type` existed:
 //
 //   day   = 06:00–17:59
 //   night = 18:00–05:59

@@ -32,6 +32,11 @@ const COL = {
   protein: 'เนื้อสัตว์',
   price: 'ราคา (บาท)',
   image: 'รูปภาพ',
+  // English companions. Absent when the source has no translation column, in
+  // which case text() yields '' and the app falls back to the Thai value.
+  headingEn: 'หัวข้อ(en)',
+  nameEn: 'ชื่อรายการ(en)',
+  proteinEn: 'เนื้อสัตว์(en)',
 };
 
 const KIND_DISH = 'เมนูหลัก';       // a sellable dish
@@ -163,7 +168,9 @@ export function groupDishRows(rows) {
     if (!g) {
       g = {
         name: baseName,
+        nameEn: text(row[COL.nameEn]),       // '' when no translation column
         heading,
+        headingEn: text(row[COL.headingEn]),
         theme,
         group: text(row[COL.group]) === DRINK_GROUP ? 'drink' : 'food',
         image: text(row[COL.image]),
@@ -173,7 +180,14 @@ export function groupDishRows(rows) {
       groups.push(g);
     }
     if (!g.image) g.image = text(row[COL.image]); // first variant that has one
-    g.rows.push({ row, rawName, protein, price: toNumber(row[COL.price], 0) });
+    g.rows.push({
+      row,
+      rawName,
+      rawNameEn: text(row[COL.nameEn]),
+      protein,
+      proteinEn: text(row[COL.proteinEn]),
+      price: toNumber(row[COL.price], 0),
+    });
   }
 
   // Pass 2 — resolve each group's identity (id + display name + options).
@@ -181,7 +195,7 @@ export function groupDishRows(rows) {
     const variants = g.rows.filter((r) => r.protein);
     // 2+ protein variants -> a single dish with selectable options.
     const options = variants.length >= 2
-      ? variants.map((r) => ({ name: r.protein, price: r.price }))
+      ? variants.map((r) => ({ name: r.protein, nameEn: r.proteinEn, price: r.price }))
       : [];
     const price = options.length
       ? Math.min(...options.map((o) => o.price)) // "starts at" price
@@ -190,14 +204,19 @@ export function groupDishRows(rows) {
     // keep the original wording ("ผัดเผ็ดราดข้าว หมู") rather than the stripped
     // base name.
     const name = options.length ? g.name : g.rows[0].rawName;
+    // The English name never carries the protein (the sheet's translations are
+    // of the base dish), so both cases take the group's English name.
+    const nameEn = options.length ? g.nameEn : g.rows[0].rawNameEn;
 
     return {
       id: idFor(g.theme, g.heading, name),
       name,
+      nameEn,
       price,
       options,
       baseName: g.name, // protein stripped; what the emoji fallback keys off
       heading: g.heading,
+      headingEn: g.headingEn,
       theme: g.theme,
       group: g.group,
       image: g.image,
@@ -217,8 +236,10 @@ export function menuRowsToMenu(rows) {
   return groupDishRows(rows).map((dish) => ({
     id: dish.id,
     name: dish.name,
+    nameEn: dish.nameEn,                        // '' -> UI falls back to Thai
     price: dish.price,
     category: dish.heading || 'อื่นๆ',
+    categoryEn: dish.headingEn,
     group: dish.group,
     theme: dish.theme, // from the `theme` column: 'day' or 'night'
     emoji: emojiFor(dish.baseName),
@@ -257,7 +278,12 @@ export function addonRowsToAddons(rows) {
     // สั่งกลับบ้าน is listed under both อาหาร and เพิ่มเติม — keep it once.
     if (bucket.some((a) => a.name === name)) continue;
 
-    bucket.push({ id: idFor(theme, 'addon', name), name, price: toNumber(row[COL.price], 0) });
+    bucket.push({
+      id: idFor(theme, 'addon', name),
+      name,
+      nameEn: text(row[COL.nameEn]),
+      price: toNumber(row[COL.price], 0),
+    });
   }
   return out;
 }
@@ -285,11 +311,16 @@ export function choiceRowsToChoices(rows) {
     const bucket = text(row[COL.group]) === DRINK_GROUP ? out.drink : out.food;
     let group = bucket.find((g) => g.name === heading);
     if (!group) {
-      group = { id: idFor('day', 'choice', heading), name: heading, options: [] };
+      group = {
+        id: idFor('day', 'choice', heading),
+        name: heading,
+        nameEn: text(row[COL.headingEn]),
+        options: [],
+      };
       bucket.push(group);
     }
     if (group.options.some((o) => o.name === name)) continue;
-    group.options.push({ name, price: toNumber(row[COL.price], 0) });
+    group.options.push({ name, nameEn: text(row[COL.nameEn]), price: toNumber(row[COL.price], 0) });
   }
 
   // A group with one option is not a choice — hide it rather than show a radio

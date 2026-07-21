@@ -2,7 +2,6 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { ShoppingBag, ShoppingBasket, Trash2, X, Plus, Minus, CheckCircle } from 'lucide-react';
 import { isDrinkItem, addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
 import { mergeOrder, itemRound } from '../orders';
-import { shiftNow } from '../shift';
 import { resolveImageUrl, fetchStockAvailability } from '../api';
 
 // Normalise a name for stock↔menu matching: trim, collapse inner whitespace,
@@ -20,12 +19,14 @@ const GROUPS = [
   {
     key: 'food',
     label: 'เมนูอาหาร',
+    labelEn: 'Food',
     image: { day: foodDayImg, night: foodNightImg },
     fallback: 'from-[#A9713D] to-[#6B4021]',
   },
   {
     key: 'drink',
     label: 'เครื่องดื่ม',
+    labelEn: 'Drinks',
     image: { day: beverageDayImg, night: beverageNightImg },
     fallback: 'from-[#C99A5B] to-[#8A5A32]',
   },
@@ -33,6 +34,7 @@ const GROUPS = [
 
 function CustomerView({
   theme,
+  lang = 'th',
   tableNo,
   menu,
   orders,
@@ -58,6 +60,10 @@ function CustomerView({
   const [showSuccessNotice, setShowSuccessNotice] = useState(false);
 
   const isDay = theme === 'day';
+  const isEn = lang === 'en';
+  // Pick the English text when the menu is in English AND a translation exists;
+  // otherwise fall back to Thai. Every menu string in this view goes through it.
+  const t = (th, en) => (isEn && en ? en : th);
 
   // Live stock levels from the คลังวัตถุดิบ (stock_items) table. Public read, so
   // the customer tab can grey out a sold-out dish. Refreshed on mount and every
@@ -108,14 +114,14 @@ function CustomerView({
   const sections = itemsToShow.reduce((acc, item) => {
     const section = acc.find(s => s.category === item.category);
     if (section) section.items.push(item);
-    else acc.push({ category: item.category, items: [item] });
+    else acc.push({ category: item.category, categoryEn: item.categoryEn, items: [item] });
     return acc;
   }, []);
 
   // The line under a dish name: its protein/size choices, e.g. "หมู/ไก่/ทะเล".
   const subtitleOf = (dish) =>
     dish.options && dish.options.length
-      ? dish.options.map(o => o.name).join('/')
+      ? dish.options.map(o => t(o.name, o.nameEn)).join('/')
       : dish.desc;
 
   // Cart operations
@@ -142,11 +148,11 @@ function CustomerView({
   const basePriceOf = (item, option) =>
     option ? option.price : (item ? item.price : 0);
 
-  const handleAddonChange = (addonName, price, isChecked) => {
+  const handleAddonChange = (addon, isChecked) => {
     if (isChecked) {
-      setSelectedAddons(prev => [...prev, { name: addonName, price }]);
+      setSelectedAddons(prev => [...prev, { name: addon.name, nameEn: addon.nameEn, price: addon.price }]);
     } else {
-      setSelectedAddons(prev => prev.filter(a => a.name !== addonName));
+      setSelectedAddons(prev => prev.filter(a => a.name !== addon.name));
     }
   };
 
@@ -159,13 +165,20 @@ function CustomerView({
       selectedAddons.reduce((sum, a) => sum + a.price, 0) + choicesCost(selectedChoices);
     const basePrice = basePriceOf(selectedItem, selectedOption);
     // Fold the chosen protein into the item name, e.g. "ทอดน้ำปลาราดข้าว (หมู)".
-    const itemName = selectedOption
-      ? `${selectedItem.name} (${selectedOption.name})`
-      : selectedItem.name;
+    // `name` stays Thai — it is what the kitchen ticket and the bill show. A
+    // parallel `nameEn` carries the English so the diner's own cart can read in
+    // their language without changing what staff see.
+    const foldName = (base, optName) => (optName ? `${base} (${optName})` : base);
+    const itemName = foldName(selectedItem.name, selectedOption?.name);
+    const itemNameEn = foldName(
+      t(selectedItem.name, selectedItem.nameEn),
+      selectedOption ? t(selectedOption.name, selectedOption.nameEn) : null
+    );
     const cartItem = {
       id: selectedItem.id + '_' + Date.now().toString(36),
       menuId: selectedItem.id,
       name: itemName,
+      nameEn: itemNameEn,
       option: selectedOption ? selectedOption.name : null,
       basePrice: basePrice,
       price: basePrice,
@@ -175,13 +188,17 @@ function CustomerView({
         ...Object.values(selectedChoices).map(o => o.name),
         ...selectedAddons.map(a => a.name),
       ],
+      addonsEn: [
+        ...Object.values(selectedChoices).map(o => t(o.name, o.nameEn)),
+        ...selectedAddons.map(a => t(a.name, a.nameEn)),
+      ],
       note: modalNotes,
       stockRef: selectedItem.stockRef || null
     };
 
     setCart(prev => [...prev, cartItem]);
     setSelectedItem(null);
-    showToast(`เพิ่ม ${cartItem.name} ลงตะกร้าแล้ว`);
+    showToast(isEn ? `Added ${itemNameEn} to cart` : `เพิ่ม ${itemName} ลงตะกร้าแล้ว`);
   };
 
   const handleRemoveCartItem = (itemId) => {
@@ -230,15 +247,21 @@ function CustomerView({
       no: orderNo,
       time: new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }),
       createdAt: Date.now(),
-      // Shift is stamped from the wall clock at creation, not the browsed theme.
-      type: shiftNow(),
+      // Shift is stamped from the menu/theme the customer ordered from, so a
+      // day-menu order always lands on the day board and a night-menu order on
+      // the night board — regardless of the wall clock.
+      type: theme,
       table: tableNo,
       items: cart.map(item => ({
         name: item.name,
+        // English mirrors of name/add-ons ride along so the diner's own bill can
+        // read in their language; staff keep seeing the Thai `name`/`addOns`.
+        nameEn: item.nameEn,
         qty: item.qty,
         price: item.basePrice,
         addonCost: item.addonCost,
         addOns: item.addons,
+        addOnsEn: item.addonsEn,
         note: item.note
       })),
       total: cartTotal,
@@ -272,11 +295,11 @@ function CustomerView({
 
   const getStatusLabel = (status) => {
     switch (status) {
-      case 'new': return 'ได้รับรายการแล้ว';
-      case 'cooking': return 'กำลังปรุงร้อนๆ';
-      case 'served': return 'เสิร์ฟเสร็จแล้ว';
-      case 'paid': return 'ชำระเงินเรียบร้อย';
-      case 'cancelled': return 'ยกเลิกออเดอร์';
+      case 'new': return t('ได้รับรายการแล้ว', 'Order received');
+      case 'cooking': return t('กำลังปรุงร้อนๆ', 'Cooking');
+      case 'served': return t('เสิร์ฟเสร็จแล้ว', 'Served');
+      case 'paid': return t('ชำระเงินเรียบร้อย', 'Paid');
+      case 'cancelled': return t('ยกเลิกออเดอร์', 'Cancelled');
       default: return status;
     }
   };
@@ -299,7 +322,7 @@ function CustomerView({
       {showSuccessNotice && (
         <div className="fixed top-4 left-1/2 transform -translate-x-1/2 bg-green-600 text-white py-3 px-6 rounded-2xl shadow-2xl z-[210] flex items-center gap-2 animate-bounce border border-green-500">
           <CheckCircle className="w-5 h-5" />
-          <span className="text-xs font-bold font-thai">ส่งรายการอาหารเข้าครัวเรียบร้อยแล้ว!</span>
+          <span className="text-xs font-bold font-thai">{t('ส่งรายการอาหารเข้าครัวเรียบร้อยแล้ว!', 'Your order has been sent to the kitchen!')}</span>
         </div>
       )}
 
@@ -307,12 +330,12 @@ function CustomerView({
       {showStatusList ? (
         <div className="space-y-4">
           <div className="flex justify-between items-center p-2 rounded-xl bg-strip-soft">
-            <h2 className="font-extrabold text-base font-kanit">สถานะสั่งซื้อ โต๊ะ {tableNo}</h2>
+            <h2 className="font-extrabold text-base font-kanit">{t('สถานะสั่งซื้อ โต๊ะ', 'Order status · Table')} {tableNo}</h2>
             <button
               onClick={() => setShowStatusList(false)}
               className="text-xs px-3 py-1.5 font-bold rounded-lg border transition-all bg-raised hover:bg-raised-hover border-line-strong text-ink"
             >
-              ← กลับไปสั่งอาหาร
+              ← {t('กลับไปสั่งอาหาร', 'Back to menu')}
             </button>
           </div>
 
@@ -346,16 +369,16 @@ function CustomerView({
                           {showRoundDivider && (
                             <div className="flex items-center gap-2 pt-1.5 text-[9px] text-neutral-400 dark:text-[#9B8875] font-semibold">
                               <span className="h-px flex-1 bg-neutral-200 dark:bg-[#4A3A2C]" />
-                              สั่งเพิ่ม · รอบที่ {itemRound(item)}
+                              {t('สั่งเพิ่ม · รอบที่', 'Added · round')} {itemRound(item)}
                               <span className="h-px flex-1 bg-neutral-200 dark:bg-[#4A3A2C]" />
                             </div>
                           )}
                           <div className="flex justify-between items-start text-xs">
                             <div>
                               <span className="font-extrabold text-amber-700 dark:text-[#E8B45C] mr-1.5">{item.qty}×</span>
-                              <span className="font-semibold">{item.name}</span>
+                              <span className="font-semibold">{t(item.name, item.nameEn)}</span>
                               {item.addOns && item.addOns.length > 0 && (
-                                <p className="text-[9px] text-neutral-400 dark:text-[#9B8875] pl-5 font-medium">ตัวเลือก: {item.addOns.join(', ')}</p>
+                                <p className="text-[9px] text-neutral-400 dark:text-[#9B8875] pl-5 font-medium">{t('ตัวเลือก', 'Options')}: {(isEn && item.addOnsEn ? item.addOnsEn : item.addOns).join(', ')}</p>
                               )}
                               {item.note && (
                                 <p className="text-[9px] text-orange-900/60 dark:text-[#C9B8A6] pl-5 italic font-medium">📝 "{item.note}"</p>
@@ -369,9 +392,9 @@ function CustomerView({
                   </div>
 
                   <div className="border-t border-dashed border-neutral-200/80 dark:border-[#4A3A2C] mt-3 pt-2.5 flex justify-between items-center text-xs">
-                    <span className="text-[10px] text-neutral-400 dark:text-[#9B8875] font-medium">สั่งเมื่อ {order.time} น.</span>
+                    <span className="text-[10px] text-neutral-400 dark:text-[#9B8875] font-medium">{t('สั่งเมื่อ', 'Ordered at')} {order.time} {t('น.', '')}</span>
                     <div>
-                      <span className="text-neutral-400 dark:text-[#9B8875] text-[10px] mr-1 font-medium">รวมทั้งสิ้น</span>
+                      <span className="text-neutral-400 dark:text-[#9B8875] text-[10px] mr-1 font-medium">{t('รวมทั้งสิ้น', 'Total')}</span>
                       <span className="font-mono font-extrabold text-sm text-amber-700 dark:text-[#E8B45C]">฿{order.total.toLocaleString()}</span>
                     </div>
                   </div>
@@ -380,12 +403,12 @@ function CustomerView({
             ) : (
               <div className="text-center py-10 space-y-2 border border-dashed rounded-2xl border-neutral-200 dark:border-[#4A3A2C]">
                 <span className="text-3xl">🧾</span>
-                <p className="text-neutral-400 dark:text-[#9B8875] font-medium text-xs">โต๊ะนี้ยังไม่มีข้อมูลออเดอร์ในวันนี้</p>
+                <p className="text-neutral-400 dark:text-[#9B8875] font-medium text-xs">{t('โต๊ะนี้ยังไม่มีข้อมูลออเดอร์ในวันนี้', 'No orders for this table yet')}</p>
                 <button
                   onClick={() => setShowStatusList(false)}
                   className="text-xs text-amber-600 dark:text-[#E8B45C] font-bold underline mt-1 block"
                 >
-                  สั่งอาหารมื้ออร่อยของคุณเลย →
+                  {t('สั่งอาหารมื้ออร่อยของคุณเลย →', 'Start your order →')}
                 </button>
               </div>
             )}
@@ -416,7 +439,7 @@ function CustomerView({
                 />
                 <span className="absolute inset-0 bg-gradient-to-t from-black/50 via-black/15 to-black/25" />
                 <span className="relative font-kanit text-2xl font-bold text-white [text-shadow:0_2px_6px_rgba(0,0,0,0.65)]">
-                  {group.label}
+                  {t(group.label, group.labelEn)}
                 </span>
               </button>
             ))}
@@ -424,12 +447,12 @@ function CustomerView({
 
           {/* HOW-TO-ORDER STEP GUIDE — สั่งอาหารง่ายๆ ใน 3 ขั้นตอน */}
           <div className="rounded-2xl p-4 bg-card border border-line">
-            <h3 className="font-kanit font-bold text-base text-heading mb-3">สั่งอาหารง่ายๆ ใน 3 ขั้นตอน</h3>
+            <h3 className="font-kanit font-bold text-base text-heading mb-3">{t('สั่งอาหารง่ายๆ ใน 3 ขั้นตอน', 'Order in 3 easy steps')}</h3>
             <div className="grid grid-cols-3 gap-2">
               {[
-                { n: '1', icon: '📖', title: 'เลือกเมนู', desc: 'แตะรายการที่ต้องการ' },
-                { n: '2', icon: '🛒', title: 'ใส่ตะกร้า', desc: 'เลือกตัวเลือกแล้วกดใส่ตะกร้า' },
-                { n: '3', icon: '🍽️', title: 'ส่งเข้าครัว', desc: 'กดยืนยันส่งรายการ' },
+                { n: '1', icon: '📖', title: t('เลือกเมนู', 'Choose'), desc: t('แตะรายการที่ต้องการ', 'Tap a dish you like') },
+                { n: '2', icon: '🛒', title: t('ใส่ตะกร้า', 'Add to cart'), desc: t('เลือกตัวเลือกแล้วกดใส่ตะกร้า', 'Pick options, add to cart') },
+                { n: '3', icon: '🍽️', title: t('ส่งเข้าครัว', 'Send'), desc: t('กดยืนยันส่งรายการ', 'Confirm to send') },
               ].map(step => (
                 <div key={step.n} className="text-center space-y-1">
                   <div className="relative w-11 h-11 mx-auto rounded-full flex items-center justify-center text-xl bg-amber-100">
@@ -450,7 +473,7 @@ function CustomerView({
             sections.map(section => (
               <div key={section.category} className="space-y-3">
                 <h2 className="font-kanit text-xl font-semibold text-heading">
-                  {section.category}
+                  {t(section.category, section.categoryEn)}
                 </h2>
 
                 {section.items.map(dish => {
@@ -469,7 +492,7 @@ function CustomerView({
 
                     <div className="flex-1 min-w-0">
                       <h4 className="font-kanit font-bold text-[17px] leading-snug truncate text-title">
-                        {dish.name}
+                        {t(dish.name, dish.nameEn)}
                       </h4>
                       {subtitleOf(dish) && (
                         <p className="text-sm truncate mt-0.5 text-ink-2">{subtitleOf(dish)}</p>
@@ -480,7 +503,7 @@ function CustomerView({
                         </span>
                         {!available && (
                           <span className="text-[10px] text-red-600 bg-red-100 px-2 py-0.5 rounded-full font-semibold">
-                            หมดชั่วคราว
+                            {t('หมดชั่วคราว', 'Sold out')}
                           </span>
                         )}
                       </div>
@@ -497,7 +520,7 @@ function CustomerView({
               </div>
             ))
           ) : (
-            <div className="text-center py-10 text-xs font-medium text-ink-3">ยังไม่มีรายการเมนูในหมวดนี้</div>
+            <div className="text-center py-10 text-xs font-medium text-ink-3">{t('ยังไม่มีรายการเมนูในหมวดนี้', 'No items in this category yet')}</div>
           )}
 
           {/* VIEW STATUS SHORTCUT BUTTON */}
@@ -529,11 +552,11 @@ function CustomerView({
                   {cartCount}
                 </span>
               </div>
-              <span className="text-xs font-thai font-semibold">ดูรายการในตะกร้า</span>
+              <span className="text-xs font-thai font-semibold">{t('ดูรายการในตะกร้า', 'View cart')}</span>
             </div>
 
             <div className="flex items-center gap-1.5">
-              <span className="text-[10px] opacity-75 font-normal">ราคารวม</span>
+              <span className="text-[10px] opacity-75 font-normal">{t('ราคารวม', 'Total')}</span>
               <span className="font-mono text-sm font-extrabold">฿{cartTotal.toLocaleString()}</span>
             </div>
           </button>
@@ -547,7 +570,7 @@ function CustomerView({
 
             <div className="flex justify-between items-start">
               <div>
-                <h3 className="text-base font-extrabold font-kanit">{selectedItem.name}</h3>
+                <h3 className="text-base font-extrabold font-kanit">{t(selectedItem.name, selectedItem.nameEn)}</h3>
                 <span className="text-amber-600 font-extrabold font-mono text-base block mt-0.5">฿{basePriceOf(selectedItem, selectedOption)}</span>
               </div>
               <button
@@ -568,7 +591,9 @@ function CustomerView({
             {selectedItem.options && selectedItem.options.length > 0 && (
               <div className="space-y-2">
                 <h4 className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400">
-                  {selectedItem.options.every(o => ['M', 'L', 'S'].includes(o.name)) ? 'เลือกขนาด' : 'เลือกเนื้อสัตว์'}
+                  {selectedItem.options.every(o => ['M', 'L', 'S'].includes(o.name))
+                    ? t('เลือกขนาด', 'Select size')
+                    : t('เลือกเนื้อสัตว์', 'Select protein')}
                 </h4>
                 <div className="grid grid-cols-2 gap-1.5">
                   {selectedItem.options.map(opt => (
@@ -584,7 +609,7 @@ function CustomerView({
                           onChange={() => setSelectedOption(opt)}
                           className="w-4 h-4 text-amber-600 border-neutral-300 focus:ring-amber-500"
                         />
-                        <span className="font-semibold text-neutral-700">{opt.name}</span>
+                        <span className="font-semibold text-neutral-700">{t(opt.name, opt.nameEn)}</span>
                       </div>
                       <span className="text-neutral-500 font-bold font-mono">฿{opt.price}</span>
                     </label>
@@ -597,7 +622,7 @@ function CustomerView({
             {choicesFor(choices, theme, selectedItem).map(group => (
               <div key={group.id || group.name} className="space-y-2">
                 <h4 className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400">
-                  {group.name}
+                  {t(group.name, group.nameEn)}
                 </h4>
                 <div className="grid grid-cols-2 gap-1.5">
                   {group.options.map(opt => (
@@ -613,7 +638,7 @@ function CustomerView({
                           onChange={() => handleChoiceChange(group.name, opt)}
                           className="w-4 h-4 text-amber-600 border-neutral-300 focus:ring-amber-500"
                         />
-                        <span className="font-semibold text-neutral-700">{opt.name}</span>
+                        <span className="font-semibold text-neutral-700">{t(opt.name, opt.nameEn)}</span>
                       </div>
                       {opt.price > 0 && (
                         <span className="text-neutral-500 font-bold font-mono">+฿{opt.price}</span>
@@ -627,7 +652,7 @@ function CustomerView({
             {/* ADDONS LIST */}
             {addonsFor(addons, theme, selectedItem).length > 0 && (
             <div className="space-y-2">
-              <h4 className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400">ตัวเลือกเพิ่มเติม</h4>
+              <h4 className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400">{t('ตัวเลือกเพิ่มเติม', 'Add-ons')}</h4>
               <div className="space-y-1.5">
                 {addonsFor(addons, theme, selectedItem).map(addon => (
                   <label
@@ -638,10 +663,10 @@ function CustomerView({
                       <input
                         type="checkbox"
                         checked={selectedAddons.some(a => a.name === addon.name)}
-                        onChange={(e) => handleAddonChange(addon.name, addon.price, e.target.checked)}
+                        onChange={(e) => handleAddonChange(addon, e.target.checked)}
                         className="w-4 h-4 text-amber-600 border-neutral-300 rounded focus:ring-amber-500"
                       />
-                      <span className="font-semibold text-neutral-700">{addon.name}</span>
+                      <span className="font-semibold text-neutral-700">{t(addon.name, addon.nameEn)}</span>
                     </div>
                     <span className="text-neutral-500 font-bold font-mono">+฿{addon.price}</span>
                   </label>
@@ -652,11 +677,11 @@ function CustomerView({
 
             {/* CUSTOM NOTES */}
             <div className="space-y-1.5">
-              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">หมายเหตุเพิ่มเติมถึงครัว</label>
+              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">{t('หมายเหตุเพิ่มเติมถึงครัว', 'Note to the kitchen')}</label>
               <textarea
                 value={modalNotes}
                 onChange={e => setModalNotes(e.target.value)}
-                placeholder="เช่น ขอเผ็ดน้อยมาก, ไม่ใส่ผักชี, หรืออื่นๆ..."
+                placeholder={t('เช่น ขอเผ็ดน้อยมาก, ไม่ใส่ผักชี, หรืออื่นๆ...', 'e.g. less spicy, no coriander, etc.')}
                 className="w-full text-xs border border-neutral-200 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-amber-500 h-16 resize-none"
               />
             </div>
@@ -683,7 +708,7 @@ function CustomerView({
                 onClick={handleAddToCart}
                 className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl transition text-center text-xs"
               >
-                ใส่ตะกร้าสินค้า (฿{((basePriceOf(selectedItem, selectedOption) + selectedAddons.reduce((sum, a) => sum + a.price, 0) + choicesCost(selectedChoices)) * modalQty).toLocaleString()})
+                {t('ใส่ตะกร้าสินค้า', 'Add to cart')} (฿{((basePriceOf(selectedItem, selectedOption) + selectedAddons.reduce((sum, a) => sum + a.price, 0) + choicesCost(selectedChoices)) * modalQty).toLocaleString()})
               </button>
             </div>
 
@@ -699,7 +724,7 @@ function CustomerView({
             <div className="flex justify-between items-center">
               <h3 className="text-base font-extrabold font-kanit flex items-center gap-2">
                 <ShoppingBag className="text-amber-600 w-5 h-5" />
-                <span>ตะกร้าสินค้าของคุณ (โต๊ะ {tableNo})</span>
+                <span>{t('ตะกร้าสินค้าของคุณ', 'Your cart')} ({t('โต๊ะ', 'Table')} {tableNo})</span>
               </h3>
               <button
                 onClick={() => setShowCartModal(false)}
@@ -714,12 +739,12 @@ function CustomerView({
               {cart.map(cartItem => (
                 <div key={cartItem.id} className="py-3.5 flex justify-between items-start text-xs font-thai">
                   <div className="space-y-1 pr-4">
-                    <span className="font-extrabold text-neutral-800 text-sm">{cartItem.name} <b className="text-amber-700">x{cartItem.qty}</b></span>
+                    <span className="font-extrabold text-neutral-800 text-sm">{t(cartItem.name, cartItem.nameEn)} <b className="text-amber-700">x{cartItem.qty}</b></span>
                     {cartItem.addons.length > 0 && (
-                      <p className="text-[10px] text-neutral-400 font-medium">พิเศษ: {cartItem.addons.join(', ')}</p>
+                      <p className="text-[10px] text-neutral-400 font-medium">{t('พิเศษ', 'Extras')}: {(isEn && cartItem.addonsEn ? cartItem.addonsEn : cartItem.addons).join(', ')}</p>
                     )}
                     {cartItem.note && (
-                      <p className="text-[10px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded-lg inline-block italic">รายละเอียด: "{cartItem.note}"</p>
+                      <p className="text-[10px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded-lg inline-block italic">{t('รายละเอียด', 'Note')}: "{cartItem.note}"</p>
                     )}
                   </div>
                   <div className="flex items-center gap-3.5">
@@ -738,7 +763,7 @@ function CustomerView({
             {/* TOTAL */}
             <div className="space-y-3 pt-3 border-t border-neutral-100">
               <div className="flex justify-between text-base font-extrabold font-kanit">
-                <span>ราคารวมสุทธิ</span>
+                <span>{t('ราคารวมสุทธิ', 'Total')}</span>
                 <span className="text-amber-600 font-mono text-lg">฿{cartTotal.toLocaleString()}</span>
               </div>
 
@@ -746,7 +771,7 @@ function CustomerView({
                 onClick={handlePlaceOrder}
                 className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-3.5 rounded-xl transition text-sm flex items-center justify-center gap-2 shadow-md"
               >
-                <span>ส่งรายการเข้าห้องครัวเลย ✓</span>
+                <span>{t('ส่งรายการเข้าห้องครัวเลย ✓', 'Send order to kitchen ✓')}</span>
               </button>
             </div>
 

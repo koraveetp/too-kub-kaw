@@ -73,6 +73,14 @@ async function fetchMenuRows() {
   const availableSelect = (await hasColumn('available'))
     ? `COALESCE(available, true) AS available`
     : `true AS available`;
+  // English companions are optional: a table without them selects '' so the
+  // transforms (and the app) simply fall back to the Thai text.
+  const subEnSelect = (await hasColumn('subcategory_en'))
+    ? `COALESCE(subcategory_en, '')` : `''`;
+  const nameEnSelect = (await hasColumn('name_en'))
+    ? `COALESCE(name_en, '')` : `''`;
+  const meatEnSelect = (await hasColumn('meat_en'))
+    ? `COALESCE(meat_en, '')` : `''`;
 
   const { rows } = await getPool().query(`
     SELECT id          AS "__rowId",
@@ -83,6 +91,9 @@ async function fetchMenuRows() {
            meat        AS "เนื้อสัตว์",
            price       AS "ราคา (บาท)",
            image_url   AS "รูปภาพ",
+           ${subEnSelect}  AS "หัวข้อ(en)",
+           ${nameEnSelect} AS "ชื่อรายการ(en)",
+           ${meatEnSelect} AS "เนื้อสัตว์(en)",
            ${themeSelect},
            ${availableSelect}
     FROM menu_items
