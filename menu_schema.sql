@@ -5,15 +5,30 @@
 
 -- 1) The table that mirrors your Google Sheet
 CREATE TABLE menu_items (
-    id          SERIAL PRIMARY KEY,          -- auto number, you don't fill this
-    category    TEXT NOT NULL,               -- หมวดหมู่  (อาหาร, เครื่องดื่ม, ...)
-    type        TEXT NOT NULL,               -- ประเภท   (เมนูหลัก, รายการเสริม)
-    subcategory TEXT,                        -- หัวข้อ   (เมนูราดข้าว, ชา, ...)
-    name        TEXT NOT NULL,               -- ชื่อรายการ
-    meat        TEXT,                         -- เนื้อสัตว์ ("-" becomes NULL, see step 3)
-    price       INTEGER NOT NULL DEFAULT 0,  -- ราคา (บาท)
-    image_url   TEXT                          -- รูปภาพ
+    id             SERIAL PRIMARY KEY,          -- auto number, you don't fill this
+    category       TEXT NOT NULL,               -- หมวดหมู่  (อาหาร, เครื่องดื่ม, ...)
+    type           TEXT NOT NULL,               -- ประเภท   (เมนูหลัก, รายการเสริม)
+    subcategory    TEXT,                        -- หัวข้อ   (เมนูราดข้าว, ชา, ...)
+    name           TEXT NOT NULL,               -- ชื่อรายการ
+    meat           TEXT,                        -- เนื้อสัตว์ ("-" becomes NULL, see step 3)
+    price          INTEGER NOT NULL DEFAULT 0,  -- ราคา (บาท)
+    image_url      TEXT,                        -- รูปภาพ
+    theme          TEXT,                        -- 'day' | 'night' — ร้านที่เมนูนี้อยู่
+    available      BOOLEAN NOT NULL DEFAULT true, -- เจ้าของเปิด/ปิดขายรายการนี้
+    subcategory_en TEXT,                        -- หัวข้อ (English, optional)
+    name_en        TEXT,                        -- ชื่อรายการ (English, optional)
+    meat_en        TEXT                         -- เนื้อสัตว์ (English, optional)
 );
+
+-- ==========================================================
+-- 1b) Already created the table with an older version of this
+--     file? Add just the missing columns instead:
+-- ==========================================================
+-- ALTER TABLE menu_items ADD COLUMN theme TEXT;
+-- ALTER TABLE menu_items ADD COLUMN available BOOLEAN NOT NULL DEFAULT true;
+-- ALTER TABLE menu_items ADD COLUMN subcategory_en TEXT;
+-- ALTER TABLE menu_items ADD COLUMN name_en TEXT;
+-- ALTER TABLE menu_items ADD COLUMN meat_en TEXT;
 
 -- ==========================================================
 -- 2) Import the CSV  -> do this with the GUI (see chat steps),

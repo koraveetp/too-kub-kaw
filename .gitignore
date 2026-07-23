@@ -9,6 +9,8 @@ frontend/dist/
 
 # Runtime / local state
 backend/data.json
+# Rolling data.json snapshots (contain staff password hashes — never commit)
+backend/backups/
 # Menu photos uploaded by the owner — user content, not source
 backend/uploads/
 *.local

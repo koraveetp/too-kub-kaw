@@ -4,6 +4,7 @@ import StaffView from './components/StaffView';
 import OwnerView from './components/OwnerView';
 import { fetchState, saveResource, subscribeToState, login, setAuthToken } from './api';
 import { paletteStyle } from './admin-theme';
+import { shiftNow } from './shift';
 import { User, ShieldCheck, Key, LogOut, Sun, Moon, Smartphone, Languages } from 'lucide-react';
 import logoImg from './assets/logo.jpg';
 
@@ -80,6 +81,9 @@ const DEFAULT_SETTINGS = {
   nameNight: 'เรือนเก่า',
   tables: 12,
   baseUrl: '',
+  // PromptPay ID of the shop (mobile no. or citizen ID) — powers the
+  // pay-by-QR option at checkout. Empty disables the QR choice.
+  promptpayId: '',
   // Back-office colour overrides picked in ตั้งค่า, keyed by CSS variable.
   // Empty means "use the defaults from index.css".
   adminColors: {}
@@ -104,6 +108,11 @@ function App() {
   const [orders, setOrdersLocal] = useState([]);
   // Owner-recorded outgoings. Empty until the backend answers.
   const [expenses, setExpensesLocal] = useState([]);
+  // Staff clock-in/out records. Server-owned: read-only here, appended to only
+  // via the /api/timeclock/clock endpoint (which then broadcasts over SSE).
+  const [timeclock, setTimeclockLocal] = useState([]);
+  // Monthly payroll status keyed "user__YYYY-MM" -> 'paid'. Server-owned too.
+  const [payroll, setPayrollLocal] = useState({});
   // Extras come from the sheet via the backend; fall back to the local
   // defaults for anything it doesn't carry (i.e. the night bar).
   const [addons, setAddonsLocal] = useState(DEFAULT_ADDONS);
@@ -195,6 +204,8 @@ function App() {
       if (s.expenses) setExpensesLocal(s.expenses);
       if (s.addons) setAddonsLocal({ ...DEFAULT_ADDONS, ...s.addons });
       if (s.choices) setChoicesLocal({ ...DEFAULT_CHOICES, ...s.choices });
+      if (s.timeclock) setTimeclockLocal(s.timeclock);
+      if (s.payroll) setPayrollLocal(s.payroll);
     };
     fetchState()
       .then((s) => {
@@ -224,6 +235,11 @@ function App() {
       if (!isNaN(num) && num > 0) {
         setTableNo(num);
         setRole('customer');
+        // A QR scan is a fresh customer arrival: show the shop that is actually
+        // open right now (by the clock), never a stale theme left in
+        // localStorage from a previous session — otherwise a daytime order
+        // could be stamped onto the night shift's board and bills.
+        setTheme(shiftNow());
         showToast(`สแกนเข้าโต๊ะหมายเลข ${num} สำเร็จ`);
       }
     }
@@ -510,6 +526,7 @@ function App() {
               showToast={showToast}
               addons={addons}
               choices={choices}
+              timeclock={timeclock}
             />
           )}
 
@@ -524,6 +541,8 @@ function App() {
               staff={staff}
               setStaff={setStaff}
               showToast={showToast}
+              timeclock={timeclock}
+              payroll={payroll}
             />
           )}
         </main>

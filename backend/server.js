@@ -44,7 +44,7 @@ import {
   hasAvailableColumn,
 } from './menu-db.js';
 import { ensureOrdersTable, loadOrders, saveOrders } from './orders-db.js';
-import { fetchStockItems, fetchStockAvailability, createStockItem, adjustStockItem, restockAll } from './stock-db.js';
+import { fetchStockItems, fetchStockAvailability, createStockItem, adjustStockItem, restockAll, consumeStockByName } from './stock-db.js';
 import { hashPassword, verifyPassword, isHashed, signToken, verifyToken } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -69,12 +69,46 @@ if (!HAS_DB) {
 }
 
 // The resources a client is allowed to read/replace.
-const RESOURCES = ['orders', 'menu', 'stock', 'staff', 'settings', 'expenses'];
+const RESOURCES = ['orders', 'menu', 'stock', 'staff', 'settings', 'expenses', 'timeclock', 'payroll'];
 // Writing any of these requires a valid staff session token. `orders` and
 // `stock` are left out on purpose: an unauthenticated customer placing an order
 // appends an order AND decrements stock from the browser. `expenses` is
 // owner-only bookkeeping, so it stays protected.
 const PROTECTED_RESOURCES = new Set(['menu', 'staff', 'settings', 'expenses']);
+// Server-owned resources: readable by everyone via /api/state, but never
+// replaceable wholesale through PUT — records are only appended/updated by the
+// server's own endpoints, so timestamps can't be forged from a browser.
+const SERVER_OWNED_RESOURCES = new Set(['timeclock', 'payroll']);
+
+// --- Staff time clock (ลงเวลาเข้า-ออกงาน) -----------------------------------
+// Clocking in/out only works from inside the restaurant: the browser sends its
+// GPS position and the server checks it is within TIMECLOCK.radiusM of the
+// shop before recording the SERVER's current time (the client clock is never
+// trusted). One clock-in + one clock-out per person per day.
+const TIMECLOCK = {
+  lat: 7.1919729,      // ร้านเรือนเก่า สงขลา (https://maps.app.goo.gl/2w5Cn49iNBAnwqpv8)
+  lng: 100.5923647,
+  radiusM: 50,
+};
+
+// Great-circle distance in metres between two lat/lng points (haversine).
+function distanceMeters(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const rad = (d) => (d * Math.PI) / 180;
+  const dLat = rad(lat2 - lat1);
+  const dLng = rad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// Local calendar date (YYYY-MM-DD) for "one in + one out per day".
+function localDateKey(ts = Date.now()) {
+  const d = new Date(ts);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
 
 // --- Load / persist state ---------------------------------------------------
 let state;
@@ -88,6 +122,13 @@ try {
 } catch {
   state = structuredClone(SEED);
   console.log('[backend] No data.json found — seeding fresh state');
+}
+// The seed predates the time clock, so the resource loop above may have left
+// this undefined on both fresh and existing installs.
+if (!Array.isArray(state.timeclock)) state.timeclock = [];
+// Owner-set "paid / not paid" per staff member per month, keyed "user__YYYY-MM".
+if (!state.payroll || typeof state.payroll !== 'object' || Array.isArray(state.payroll)) {
+  state.payroll = {};
 }
 
 // One-time migration: any staff account still holding a plaintext `pass` gets
@@ -108,6 +149,34 @@ function migrateStaffPasswords() {
 }
 migrateStaffPasswords();
 
+// Rolling backups of data.json. Every persist() snapshots the OUTGOING file
+// here before it is replaced, so a bad write (e.g. a stale second server
+// instance overwriting good data with an older in-memory copy) is always
+// recoverable: the previous good version is sitting in backend/backups.
+const BACKUP_DIR = path.join(__dirname, 'backups');
+const BACKUP_KEEP = 40; // most recent snapshots to retain; older ones are pruned
+fs.mkdirSync(BACKUP_DIR, { recursive: true });
+
+// Copy the current data.json aside, then prune to the newest BACKUP_KEEP files.
+// Best-effort: a backup failure must never block or crash the real write.
+function backupCurrentData() {
+  try {
+    if (!fs.existsSync(DATA_FILE)) return; // nothing to snapshot yet (first boot)
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    fs.copyFileSync(DATA_FILE, path.join(BACKUP_DIR, `data-${stamp}.json`));
+
+    const backups = fs
+      .readdirSync(BACKUP_DIR)
+      .filter((f) => f.startsWith('data-') && f.endsWith('.json'))
+      .sort(); // ISO timestamps sort chronologically
+    for (const stale of backups.slice(0, -BACKUP_KEEP)) {
+      fs.unlinkSync(path.join(BACKUP_DIR, stale));
+    }
+  } catch (err) {
+    console.warn('[backend] Backup snapshot failed (continuing):', err.message);
+  }
+}
+
 // Write to a temp file first, then rename over the real one. rename() is
 // atomic, so a process that dies mid-write leaves data.json either fully old or
 // fully new — never the half-written file that JSON.parse rejects on the next
@@ -116,6 +185,9 @@ function persist() {
   const tmp = `${DATA_FILE}.tmp`;
   fs.writeFile(tmp, JSON.stringify(state, null, 2), (err) => {
     if (err) return console.error('[backend] Failed to write data.json:', err);
+    // Snapshot the current (about-to-be-replaced) file first, so the last good
+    // state survives even if this write turns out to carry stale data.
+    backupCurrentData();
     fs.rename(tmp, DATA_FILE, (renameErr) => {
       if (renameErr) console.error('[backend] Failed to replace data.json:', renameErr);
     });
@@ -280,10 +352,19 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
   .map((o) => o.trim())
   .filter(Boolean);
 
+// The app is served to phones/tablets over the shop's LAN (and the LAN IP
+// changes per network), so besides the fixed list also accept any localhost
+// or RFC-1918 private-network origin on any port. Public internet origins
+// are still rejected.
+const PRIVATE_ORIGIN_RE =
+  /^https?:\/\/(localhost|127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?$/;
+
 app.use(cors({
   origin(origin, cb) {
     // Same-origin / curl / server-to-server requests have no Origin header.
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    if (!origin || ALLOWED_ORIGINS.includes(origin) || PRIVATE_ORIGIN_RE.test(origin)) {
+      return cb(null, true);
+    }
     cb(new Error(`Origin not allowed by CORS: ${origin}`));
   },
 }));
@@ -443,6 +524,7 @@ function normalizeStaffWrite(incoming) {
     const user = String(raw?.user || '').trim();
     const name = String(raw?.name || '').trim() || user;
     if (!user) throw new Error('every staff member needs a username');
+    const existing = existingByUser.get(user);
 
     let passHash;
     if (raw.pass) {
@@ -450,11 +532,18 @@ function normalizeStaffWrite(incoming) {
     } else if (isHashed(raw.passHash)) {
       passHash = raw.passHash;                             // client echoed a hash
     } else {
-      passHash = existingByUser.get(user)?.passHash;       // preserve stored hash
+      passHash = existing?.passHash;                       // preserve stored hash
     }
     if (!passHash) throw new Error(`account "${user}" has no password set`);
 
-    out.push({ user, name, passHash });
+    // HR fields entered by the owner (ตำแหน่ง / ค่าแรงรายวัน / ร้านที่ประจำ).
+    // Sanitised to plain scalars; missing values fall back to the stored record
+    // so a client that omits them doesn't wipe them.
+    const position = String(raw?.position ?? existing?.position ?? '').trim().slice(0, 100);
+    const dailyWage = Math.max(0, Number(raw?.dailyWage ?? existing?.dailyWage) || 0);
+    const shop = ['day', 'night'].includes(raw?.shop) ? raw.shop : (existing?.shop || 'day');
+
+    out.push({ user, name, passHash, position, dailyWage, shop });
   }
   if (!out.length) throw new Error('at least one staff account is required');
   return out;
@@ -498,6 +587,10 @@ app.put('/api/:resource', (req, res) => {
     return res.status(404).json({ error: `Unknown resource: ${resource}` });
   }
 
+  if (SERVER_OWNED_RESOURCES.has(resource)) {
+    return res.status(403).json({ error: `${resource} can only be changed through its own endpoint` });
+  }
+
   if (PROTECTED_RESOURCES.has(resource) && !getSession(req)) {
     return res.status(401).json({ error: 'Authentication required' });
   }
@@ -520,6 +613,117 @@ app.put('/api/:resource', (req, res) => {
   // and a slow or briefly unreachable database must never stall the tab that
   // is trying to take an order.
   if (resource === 'orders') persistOrdersToDb();
+  broadcast();
+  res.json({ ok: true });
+});
+
+// Staff clock-in / clock-out. Auth required (the record is tied to the logged-in
+// account); the browser sends its GPS position and the action only succeeds
+// inside the shop's geofence. The timestamp recorded is the server's clock at
+// the moment of the request. First call of the day = clock-in, second = clock-out,
+// anything after that is rejected.
+app.post('/api/timeclock/clock', requireAuth, (req, res) => {
+  const lat = Number(req.body?.lat);
+  const lng = Number(req.body?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return res.status(400).json({ error: 'ไม่พบพิกัดตำแหน่ง กรุณาเปิดการเข้าถึงตำแหน่ง (GPS) แล้วลองใหม่' });
+  }
+
+  const distance = Math.round(distanceMeters(lat, lng, TIMECLOCK.lat, TIMECLOCK.lng));
+  if (distance > TIMECLOCK.radiusM) {
+    return res.status(403).json({
+      error: `อยู่นอกพื้นที่ร้าน (ห่างประมาณ ${distance.toLocaleString()} ม. — ลงเวลาได้ภายใน ${TIMECLOCK.radiusM} ม.)`,
+      distance,
+    });
+  }
+
+  const user = req.session.user;
+  const account = (state.staff || []).find((s) => s.user === user);
+  const now = Date.now();
+  const date = localDateKey(now);
+
+  let record = state.timeclock.find((r) => r.user === user && r.date === date);
+  let action;
+  if (!record) {
+    record = {
+      id: 'T' + now.toString(36) + Math.random().toString(36).slice(2, 6),
+      user,
+      name: account?.name || user,
+      date,
+      inAt: now,
+      outAt: null,
+    };
+    state.timeclock.push(record);
+    action = 'in';
+  } else if (!record.outAt) {
+    record.outAt = now;
+    action = 'out';
+  } else {
+    return res.status(409).json({ error: 'วันนี้ลงเวลาเข้า-ออกครบแล้ว (วันละ 1 ครั้ง)' });
+  }
+
+  persist();
+  broadcast();
+  res.json({ ok: true, action, record });
+});
+
+// Owner backfill: create or correct a day's in/out for a staff member who forgot
+// to clock (or clocked wrong). Auth required, no geofence — this is a manual
+// admin action. `date` is YYYY-MM-DD; `inAt`/`outAt` are epoch ms (outAt may be
+// null). Upserts the single record for that user+date.
+app.post('/api/timeclock/manual', requireAuth, (req, res) => {
+  const user = String(req.body?.user || '').trim();
+  const date = String(req.body?.date || '').trim();
+  const inAt = req.body?.inAt == null ? null : Number(req.body.inAt);
+  const outAt = req.body?.outAt == null ? null : Number(req.body.outAt);
+
+  const account = (state.staff || []).find((s) => s.user === user);
+  if (!account) return res.status(400).json({ error: 'ไม่พบพนักงานคนนี้' });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'รูปแบบวันที่ไม่ถูกต้อง' });
+  if (inAt != null && !Number.isFinite(inAt)) return res.status(400).json({ error: 'เวลาเข้าไม่ถูกต้อง' });
+  if (outAt != null && !Number.isFinite(outAt)) return res.status(400).json({ error: 'เวลาออกไม่ถูกต้อง' });
+  if (inAt == null && outAt == null) return res.status(400).json({ error: 'ต้องระบุเวลาเข้าหรือออกอย่างน้อยหนึ่งช่อง' });
+  if (inAt != null && outAt != null && outAt < inAt) {
+    return res.status(400).json({ error: 'เวลาออกต้องอยู่หลังเวลาเข้า' });
+  }
+
+  let record = state.timeclock.find((r) => r.user === user && r.date === date);
+  if (record) {
+    if (inAt != null) record.inAt = inAt;
+    if (outAt !== undefined) record.outAt = outAt;
+    record.manual = true;
+  } else {
+    record = {
+      id: 'T' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      user,
+      name: account.name || user,
+      date,
+      inAt: inAt ?? null,
+      outAt: outAt ?? null,
+      manual: true,
+    };
+    state.timeclock.push(record);
+  }
+
+  persist();
+  broadcast();
+  res.json({ ok: true, record });
+});
+
+// Owner sets a staff member's monthly payroll status ('paid' | 'unpaid').
+// Keyed "user__YYYY-MM". Auth required.
+app.post('/api/timeclock/payroll', requireAuth, (req, res) => {
+  const user = String(req.body?.user || '').trim();
+  const month = String(req.body?.month || '').trim();
+  const status = req.body?.status === 'paid' ? 'paid' : 'unpaid';
+  if (!user) return res.status(400).json({ error: 'missing user' });
+  if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'รูปแบบเดือนไม่ถูกต้อง' });
+
+  const key = `${user}__${month}`;
+  if (status === 'paid') state.payroll[key] = 'paid';
+  else delete state.payroll[key]; // absent = unpaid, keeps the store small
+
+  persist();
   broadcast();
   res.json({ ok: true });
 });
@@ -720,6 +924,26 @@ app.patch('/api/stock-items/:id', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[backend] Could not adjust stock item:', err.message);
     res.status(502).json({ error: 'ปรับจำนวนคลังไม่สำเร็จ' });
+  }
+});
+
+// Deduct { name, qty } from the stock row matched by dish name — fired when
+// staff mark a dish เสิร์ฟแล้ว (negative qty restores it on un-serve). A dish
+// with no matching row returns { item: null } rather than 404: not every menu
+// item is stock-linked, and the serve tap must not fail because of that.
+app.post('/api/stock-items/consume', requireAuth, async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  const qty = Number(req.body?.qty);
+  if (!name) return res.status(400).json({ error: 'ต้องระบุชื่อรายการ' });
+  if (!Number.isInteger(qty) || qty === 0 || Math.abs(qty) > 999) {
+    return res.status(400).json({ error: 'ค่า qty ต้องเป็นจำนวนเต็มไม่เกิน ±999' });
+  }
+  try {
+    const item = await consumeStockByName(name, qty);
+    res.json({ ok: true, item });
+  } catch (err) {
+    console.error('[backend] Could not consume stock:', err.message);
+    res.status(502).json({ error: 'ตัดสต็อกไม่สำเร็จ' });
   }
 });
 

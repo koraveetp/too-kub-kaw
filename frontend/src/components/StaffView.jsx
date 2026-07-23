@@ -2,8 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
 import { orderShift } from '../shift';
 import { generateInvoiceNo } from '../invoice';
-import { mergeOrder, itemRound } from '../orders';
-import { fetchStockItems, adjustStockItem, restockAllStock, resolveImageUrl } from '../api';
+import { mergeOrder, itemRound, itemStatus, ITEM_STATUS_FLOW, deriveBillStatus } from '../orders';
+import { fetchStockItems, adjustStockItem, restockAllStock, consumeStockByName, resolveImageUrl, clockTime } from '../api';
+import generatePayload from 'promptpay-qr';
+import { QRCodeSVG } from 'qrcode.react';
 import {
   ClipboardList,
   LayoutGrid,
@@ -19,7 +21,11 @@ import {
   Edit,
   X,
   Sun,
-  Moon
+  Moon,
+  Clock,
+  MapPin,
+  LogIn,
+  LogOut
 } from 'lucide-react';
 
 function StaffView({ 
@@ -33,15 +39,19 @@ function StaffView({
   activeStaffUser, 
   showToast,
   addons,
-  choices
+  choices,
+  timeclock
 }) {
-  const [subTab, setSubTab] = useState('orders'); // orders, take-order, tables, stock, qrcode
+  const [subTab, setSubTab] = useState('orders'); // orders, take-order, tables, stock, qrcode, timeclock
   // คลังวัตถุดิบ tab: read from the SQL `stock_items` table (not the mockup
   // drink `stock` used when taking an order). Loaded when the tab is opened.
   const [stockItems, setStockItems] = useState([]);
   const [stockLoading, setStockLoading] = useState(false);
   const [stockError, setStockError] = useState('');
   const [orderFilter, setOrderFilter] = useState('active'); // active, new, cooking, served, paid, all
+  // Checkout dialog: choose cash / PromptPay QR before a bill is settled.
+  // { table, billIds (oldest→newest), total, step: 'method' | 'qr' } | null
+  const [payModal, setPayModal] = useState(null);
   // Which shift's orders the board shows + notifies for. Defaults to the active
   // menu/theme, so staff see the shift matching the menu currently being served.
   const [shiftView, setShiftView] = useState(theme);
@@ -76,6 +86,51 @@ function StaffView({
   // Edit Bill states
   const [editingBill, setEditingBill] = useState(null); // holds the order object being edited
   const [editAddMenuId, setEditAddMenuId] = useState('');
+
+  // --- ลงเวลาเข้า-ออกงาน ----------------------------------------------------
+  // While true the clock button is disabled: we're waiting on the GPS fix or
+  // the server's answer. The server does the real geofence + time stamping.
+  const [clockBusy, setClockBusy] = useState(false);
+
+  // Today's local date key, matching the server's one-record-per-day key.
+  const todayKey = (() => {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  })();
+  const myClockToday = (timeclock || []).find(
+    (r) => r.user === activeStaffUser && r.date === todayKey
+  );
+  const clockFmt = (ts) =>
+    ts ? new Date(ts).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) + ' น.' : '—';
+
+  const handleClockPress = () => {
+    if (!navigator.geolocation) {
+      showToast('เบราว์เซอร์นี้ไม่รองรับการระบุตำแหน่ง (GPS)');
+      return;
+    }
+    setClockBusy(true);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const { action } = await clockTime({
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+          });
+          showToast(action === 'in' ? '✅ ลงชื่อเข้างานเรียบร้อย' : '👋 ลงชื่อออกงานเรียบร้อย');
+        } catch (err) {
+          showToast(err.message || 'ลงเวลาไม่สำเร็จ');
+        } finally {
+          setClockBusy(false);
+        }
+      },
+      () => {
+        setClockBusy(false);
+        showToast('อ่านตำแหน่งไม่ได้ กรุณาอนุญาตการเข้าถึงตำแหน่งแล้วลองใหม่');
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
+  };
 
   // --- New-order notifications (toast + sound) ------------------------------
   // Track which order ids we've already seen so the first load doesn't fire a
@@ -157,21 +212,32 @@ function StaffView({
     return list;
   };
 
+  // Actually settle bills once a payment method is confirmed in the pay modal.
+  // On payment: stamp a bill number, mark paid and record the checkout time +
+  // method ('cash' | 'qr'). Kept in `orders` as paid history (OwnerView reports
+  // read it); the table frees up on its own since getTableStatus ignores paid
+  // bills. billIds arrive oldest-first so running invoice numbers stay
+  // chronological; numbers are built up on a working copy so bill #2 counts
+  // bill #1 and each gets a distinct, sequential number.
+  const settleBills = (billIds, table, payMethod) => {
+    const paidAt = Date.now();
+    setOrders(prev => {
+      const working = [...prev];
+      for (const id of billIds) {
+        const idx = working.findIndex(o => o.id === id);
+        if (idx === -1) continue;
+        const invoiceNo = working[idx].invoiceNo || generateInvoiceNo(working[idx], working);
+        working[idx] = { ...working[idx], invoiceNo, status: 'paid', paidAt, payMethod };
+      }
+      return working;
+    });
+    // Free the table for the next group: drop any lingering workspace bound to it.
+    clearTableWorkspace(table);
+    showToast(`เช็คบิล โต๊ะ ${table} เรียบร้อยแล้ว โต๊ะพร้อมรับลูกค้าใหม่`);
+  };
+
   const payOrder = (order) => {
-    if (confirm(`ยืนยันการเช็คบิล โต๊ะ ${order.table} ยอดรวม ฿${order.total.toLocaleString()} ใช่หรือไม่?`)) {
-      // On payment: stamp a bill number, mark paid and record the checkout time.
-      // Kept in `orders` as paid history (OwnerView reports read it); the table
-      // frees up on its own since getTableStatus ignores paid bills.
-      const paidAt = Date.now();
-      setOrders(prev => prev.map(o => {
-        if (o.id !== order.id) return o;
-        // Count off `prev` so the running number reflects the latest state.
-        const invoiceNo = o.invoiceNo || generateInvoiceNo(o, prev);
-        return { ...o, invoiceNo, status: 'paid', paidAt };
-      }));
-      clearTableWorkspace(order.table);
-      showToast(`เช็คบิล โต๊ะ ${order.table} เรียบร้อยแล้ว`);
-    }
+    setPayModal({ table: order.table, billIds: [order.id], total: order.total || 0, step: 'method' });
   };
 
   const cancelOrder = (orderId) => {
@@ -186,12 +252,147 @@ function StaffView({
     }
   };
 
+  // Stock is deducted the moment a dish is marked เสิร์ฟแล้ว (สำเร็จ), by the
+  // ordered qty — not when the order is placed. `stockDone` on the item makes
+  // this idempotent: an item can be un-served (wrapped back) and served again
+  // without double-counting, and the stock is restored if it is un-served.
+  const changeStockCount = (stockRef, delta) => {
+    if (!stockRef || !delta) return;
+    setStock(prev => {
+      const s = prev[stockRef];
+      if (!s) return prev;
+      return { ...prev, [stockRef]: { ...s, count: s.count + delta } };
+    });
+  };
+
+  // The menu-card name behind an order line, for matching a stock_items row by
+  // name. Order names can carry a folded option — "ข้าวผัด (หมู)" — so prefer
+  // the menu row via menuId and fall back to stripping that suffix. Custom
+  // "เมนูอื่นๆ" items return null: they never touch stock.
+  const linkedStockName = (item) => {
+    if (!item || item.menuId === 'custom') return null;
+    const m = menu.find(mn => mn.id === item.menuId);
+    if (m) return m.name;
+    return String(item.name || '').replace(/\s*\([^)]*\)\s*$/, '').trim() || null;
+  };
+
+  // Mirror a serve/un-serve into the SQL stock_items row (คลังวัตถุดิบ) with the
+  // same name — the stock the customer storefront checks. Positive qty deducts,
+  // negative restores; no matching row is a no-op on the server. Fire-and-forget
+  // so a network hiccup never blocks the serve tap; on success the คลังวัตถุดิบ
+  // tab's local list is kept in step.
+  const consumeLinkedStock = (item, qty) => {
+    const name = linkedStockName(item);
+    if (!name || !qty) return;
+    consumeStockByName(name, qty)
+      .then((updated) => {
+        if (updated) setStockItems(prev => prev.map(it => (it.id === updated.id ? updated : it)));
+      })
+      .catch((err) => console.error('[stock] ตัดสต็อกไม่สำเร็จ:', err.message || err));
+  };
+
+  // Set ONE dish on a bill to a chosen status (รับออเดอร์ / อยู่ในครัว /
+  // เสิร์ฟแล้ว) from the per-item segmented control. The bill's own status is
+  // re-derived from its items, so the board/customer keep in sync.
+  const setItemStatusTo = (orderId, itemIndex, next) => {
+    // Read the current item from props (not inside the updater) so the stock
+    // side-effect fires exactly once even under React's double-invoked updaters.
+    const order = orders.find(o => o.id === orderId);
+    if (!order || order.status === 'paid' || order.status === 'cancelled') return;
+    const item = order.items[itemIndex];
+    const current = itemStatus(item);
+    if (next === current) return;
+
+    const nowServed = next === 'served' && !item.stockDone;
+    const unServed = current === 'served' && next !== 'served' && item.stockDone;
+    if (nowServed) { changeStockCount(item.stockRef, -item.qty); consumeLinkedStock(item, item.qty); }
+    if (unServed) { changeStockCount(item.stockRef, item.qty); consumeLinkedStock(item, -item.qty); }
+
+    setOrders(prev => prev.map(o => {
+      if (o.id !== orderId) return o;
+      const items = o.items.map((it, i) => {
+        if (i !== itemIndex) return it;
+        const upd = { ...it, status: next };
+        if (nowServed) upd.stockDone = true;
+        if (unServed) upd.stockDone = false;
+        return upd;
+      });
+      return { ...o, items, status: deriveBillStatus(items) };
+    }));
+  };
+
+  // One tap to send every not-yet-started dish on a bill into the kitchen
+  // (รับออเดอร์ → อยู่ในครัว). Dishes already cooking/served are untouched, and
+  // no stock moves here — stock only changes on เสิร์ฟแล้ว.
+  const markBillCooking = (orderId) => {
+    const order = orders.find(o => o.id === orderId);
+    if (!order || order.status === 'paid' || order.status === 'cancelled') return;
+    setOrders(prev => prev.map(o => {
+      if (o.id !== orderId) return o;
+      const items = o.items.map(it => (itemStatus(it) === 'new' ? { ...it, status: 'cooking' } : it));
+      return { ...o, items, status: deriveBillStatus(items) };
+    }));
+  };
+
+  // One tap to mark every dish on a bill served — handy when a whole table's
+  // food goes out together instead of poking each row. Deducts stock for every
+  // dish not already counted.
+  const markBillServed = (orderId) => {
+    const order = orders.find(o => o.id === orderId);
+    if (!order || order.status === 'paid' || order.status === 'cancelled') return;
+
+    // A dish counts as stock-linked via either inventory: the in-memory drink
+    // `stock` (stockRef) or a stock_items row matched by name.
+    const shouldDeduct = (it) => !it.stockDone && (it.stockRef || linkedStockName(it));
+    const toDeduct = order.items.filter(shouldDeduct);
+    if (toDeduct.length > 0) {
+      setStock(prev => {
+        const next = { ...prev };
+        toDeduct.forEach(it => {
+          if (!it.stockRef) return;
+          const s = next[it.stockRef];
+          if (s) next[it.stockRef] = { ...s, count: s.count - it.qty };
+        });
+        return next;
+      });
+      toDeduct.forEach(it => consumeLinkedStock(it, it.qty));
+    }
+
+    setOrders(prev => prev.map(o => {
+      if (o.id !== orderId) return o;
+      const items = o.items.map(it => ({
+        ...it,
+        status: 'served',
+        stockDone: shouldDeduct(it) ? true : it.stockDone,
+      }));
+      return { ...o, items, status: deriveBillStatus(items) };
+    }));
+  };
+
+  const getItemStatusLabel = (status) => {
+    switch (status) {
+      case 'new': return 'รับออเดอร์';
+      case 'cooking': return 'อยู่ในครัว';
+      case 'served': return 'เสิร์ฟแล้ว';
+      default: return status;
+    }
+  };
+
+  const getItemStatusColor = (status) => {
+    switch (status) {
+      case 'new': return 'bg-[#FDECC8] text-[#8a5a00]';
+      case 'cooking': return 'bg-[#DCE9F7] text-[#2F5D8A]';
+      case 'served': return 'bg-[#DFF0E3] text-[#2C6E49]';
+      default: return 'bg-neutral-100 text-neutral-600';
+    }
+  };
+
   const getStatusLabel = (status) => {
     switch (status) {
-      case 'new': return 'ใหม่';
-      case 'cooking': return 'กำลังทำ';
+      case 'new': return 'รับออเดอร์';
+      case 'cooking': return 'อยู่ในครัว';
       case 'served': return 'เสิร์ฟแล้ว';
-      case 'paid': return 'ชำระแล้ว';
+      case 'paid': return 'เช็กบิลแล้ว';
       case 'cancelled': return 'ยกเลิก';
       default: return status;
     }
@@ -252,7 +453,9 @@ function StaffView({
         addonCost: addonCost,
         addOns: [...chosenNames, ...selectedAddons.map(a => a.name)],
         note: modalNotes,
-        round: lastRound
+        round: lastRound,
+        status: 'new',
+        stockRef: selectedItem.stockRef || null
       }];
       const total = items.reduce((sum, item) => sum + (item.price + (item.addonCost || 0)) * item.qty, 0);
       setEditingBill({ ...editingBill, items, total });
@@ -360,15 +563,9 @@ function StaffView({
       return;
     }
 
-    // Deduct stock
-    const updatedStock = { ...stock };
-    takeOrderCart.forEach(cartItem => {
-      if (cartItem.stockRef && updatedStock[cartItem.stockRef]) {
-        updatedStock[cartItem.stockRef].count -= cartItem.qty;
-      }
-    });
-    setStock(updatedStock);
-
+    // Stock is NOT deducted here — it comes off only when each dish is marked
+    // เสิร์ฟแล้ว (สำเร็จ). We carry `stockRef` onto the order item so the serve
+    // action knows what to subtract.
     const orderNo = '#' + String(orders.length + 1).padStart(3, '0');
     const directTotal = takeOrderCart.reduce((sum, item) => sum + (item.basePrice + item.addonCost) * item.qty, 0);
     const newOrder = {
@@ -386,7 +583,8 @@ function StaffView({
         price: item.basePrice,
         addonCost: item.addonCost,
         addOns: item.addons,
-        note: item.note
+        note: item.note,
+        stockRef: item.stockRef || null
       })),
       total: directTotal,
       status: 'new',
@@ -452,7 +650,14 @@ function StaffView({
     } else {
       setOrders(prev => prev.map(o => {
         if (o.id === editingBill.id) {
-          return { ...o, items: editingBill.items, total: editingBill.total };
+          // Re-derive the bill status: a newly added 'new' dish reopens the
+          // ticket for the kitchen even if earlier rounds were served.
+          return {
+            ...o,
+            items: editingBill.items,
+            total: editingBill.total,
+            status: deriveBillStatus(editingBill.items),
+          };
         }
         return o;
       }));
@@ -489,32 +694,11 @@ function StaffView({
     );
     if (activeBills.length === 0) return;
     const grandTotal = activeBills.reduce((sum, o) => sum + (o.total || 0), 0);
-    if (!confirm(`ยืนยันการเช็คบิล โต๊ะ ${table} ยอดรวม ฿${grandTotal.toLocaleString()} ใช่หรือไม่?`)) return;
-
-    // Settle each bill oldest-first so the running invoice numbers come out in
-    // chronological order.
-    const orderedIds = [...activeBills]
+    // Oldest-first so the running invoice numbers come out in chronological order.
+    const billIds = [...activeBills]
       .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
       .map(o => o.id);
-    const paidAt = Date.now();
-
-    // Mark paid — kept in `orders` as history so OwnerView's Excel report still
-    // sees them (never removed). Assign a SEPARATE invoice number to each bill,
-    // building the numbers up on a working copy so bill #2 counts bill #1 (etc.)
-    // and each gets a distinct, sequential number.
-    setOrders(prev => {
-      const working = [...prev];
-      for (const id of orderedIds) {
-        const idx = working.findIndex(o => o.id === id);
-        if (idx === -1) continue;
-        const invoiceNo = working[idx].invoiceNo || generateInvoiceNo(working[idx], working);
-        working[idx] = { ...working[idx], invoiceNo, status: 'paid', paidAt };
-      }
-      return working;
-    });
-    // Free the table for the next group: drop any lingering workspace bound to it.
-    clearTableWorkspace(table);
-    showToast(`เช็คบิล โต๊ะ ${table} เรียบร้อยแล้ว โต๊ะพร้อมรับลูกค้าใหม่`);
+    setPayModal({ table, billIds, total: grandTotal, step: 'method' });
   };
 
   // --- คลังวัตถุดิบ (SQL stock_items) ---------------------------------------
@@ -652,8 +836,8 @@ function StaffView({
                                 <span className="h-px flex-1 bg-neutral-200" />
                               </div>
                             )}
-                            <div className="flex justify-between items-start text-xs font-thai text-neutral-800">
-                              <div>
+                            <div className="flex justify-between items-start gap-2 text-xs font-thai text-neutral-800">
+                              <div className="min-w-0">
                                 <span className="font-bold text-amber-700 mr-1.5">{item.qty}×</span>
                                 <span>{item.name}</span>
                                 {item.addOns && item.addOns.length > 0 && (
@@ -663,7 +847,28 @@ function StaffView({
                                   <p className="text-[9px] text-red-500 italic pl-5">📝 {item.note}</p>
                                 )}
                               </div>
-                              <span className="font-mono text-neutral-500 font-medium">฿{(item.price + (item.addonCost || 0)) * item.qty}</span>
+                              <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                                <span className="font-mono text-neutral-500 font-medium">฿{(item.price + (item.addonCost || 0)) * item.qty}</span>
+                                {order.status === 'paid' || order.status === 'cancelled' ? (
+                                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${getItemStatusColor(itemStatus(item))}`}>
+                                    {getItemStatusLabel(itemStatus(item))}
+                                  </span>
+                                ) : (
+                                  /* Segmented per-dish status: every step visible, tap to set. */
+                                  <div className="flex rounded-full border border-neutral-200 overflow-hidden">
+                                    {ITEM_STATUS_FLOW.map(s => (
+                                      <button
+                                        key={s}
+                                        onClick={() => setItemStatusTo(order.id, idx, s)}
+                                        className={`text-[9px] font-bold px-2 py-0.5 transition active:scale-95 ${itemStatus(item) === s ? getItemStatusColor(s) : 'bg-admin-card text-neutral-300 hover:text-neutral-500'}`}
+                                        title={`เปลี่ยนสถานะเป็น ${getItemStatusLabel(s)}`}
+                                      >
+                                        {getItemStatusLabel(s)}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           </React.Fragment>
                         );
@@ -675,21 +880,43 @@ function StaffView({
                       <b className="font-mono text-neutral-800 font-extrabold">฿{order.total.toLocaleString()}</b>
                     </div>
 
-                    {/* Single check-bill action */}
+                    {/* Status + check-bill actions */}
                     {order.status !== 'paid' && order.status !== 'cancelled' && (
-                      <div className="flex gap-2 mt-3 pt-2.5 border-t border-neutral-50">
-                        <button
-                          onClick={() => payOrder(order)}
-                          className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-bold py-2 rounded-xl text-xs transition"
-                        >
-                          ฿ เช็คบิล
-                        </button>
-                        <button
-                          onClick={() => cancelOrder(order.id)}
-                          className="px-3 border border-neutral-200 hover:bg-neutral-50 text-neutral-500 font-bold py-2 rounded-xl text-xs transition"
-                        >
-                          ยกเลิก
-                        </button>
+                      <div className="mt-3 pt-2.5 border-t border-neutral-50 space-y-2">
+                        {/* Whole-bill quick steps: send everything to the kitchen /
+                            mark everything served — hidden once no dish needs them. */}
+                        {order.items.some(it => itemStatus(it) !== 'served') && (
+                          <div className="flex gap-2">
+                            {order.items.some(it => itemStatus(it) === 'new') && (
+                              <button
+                                onClick={() => markBillCooking(order.id)}
+                                className="flex-1 bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 font-bold py-2 rounded-xl text-xs transition"
+                              >
+                                🍳 ส่งเข้าครัวทุกจาน
+                              </button>
+                            )}
+                            <button
+                              onClick={() => markBillServed(order.id)}
+                              className="flex-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 font-bold py-2 rounded-xl text-xs transition"
+                            >
+                              ✓ เสิร์ฟครบทุกจาน
+                            </button>
+                          </div>
+                        )}
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => payOrder(order)}
+                            className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-bold py-2 rounded-xl text-xs transition"
+                          >
+                            ฿ เช็คบิล
+                          </button>
+                          <button
+                            onClick={() => cancelOrder(order.id)}
+                            className="px-3 border border-neutral-200 hover:bg-neutral-50 text-neutral-500 font-bold py-2 rounded-xl text-xs transition"
+                          >
+                            ยกเลิก
+                          </button>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -979,6 +1206,88 @@ function StaffView({
         );
       }
 
+      case 'timeclock': {
+        // My recent records, newest first (today included), for quick reference.
+        const myRecords = (timeclock || [])
+          .filter((r) => r.user === activeStaffUser)
+          .sort((a, b) => (b.inAt || 0) - (a.inAt || 0))
+          .slice(0, 7);
+        const done = myClockToday && myClockToday.outAt;
+        return (
+          <div className="space-y-4">
+            <div className="border-l-4 border-amber-600 pl-2">
+              <h2 className="font-extrabold text-sm font-kanit uppercase tracking-wider text-neutral-400">ลงเวลาเข้า-ออกงาน</h2>
+            </div>
+
+            {/* TODAY CARD */}
+            <div className="bg-admin-card border rounded-2xl p-5 shadow-xs space-y-4 text-center">
+              <div>
+                <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider block">วันนี้ · {new Date().toLocaleDateString('th-TH', { weekday: 'long', day: 'numeric', month: 'long' })}</span>
+                <span className="font-kanit font-extrabold text-base text-neutral-800">{activeStaffUser || 'ไม่ได้เข้าสู่ระบบ'}</span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3">
+                  <span className="text-[10px] font-bold text-emerald-600 uppercase flex items-center justify-center gap-1"><LogIn className="w-3 h-3" /> เวลาเข้า</span>
+                  <span className="font-mono font-extrabold text-lg text-emerald-700 block">{clockFmt(myClockToday?.inAt)}</span>
+                </div>
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+                  <span className="text-[10px] font-bold text-amber-600 uppercase flex items-center justify-center gap-1"><LogOut className="w-3 h-3" /> เวลาออก</span>
+                  <span className="font-mono font-extrabold text-lg text-amber-700 block">{clockFmt(myClockToday?.outAt)}</span>
+                </div>
+              </div>
+
+              {done ? (
+                <div className="bg-neutral-100 text-neutral-500 font-bold py-3 rounded-xl text-xs">
+                  ✓ วันนี้ลงเวลาเข้า-ออกครบแล้ว
+                </div>
+              ) : (
+                <button
+                  onClick={handleClockPress}
+                  disabled={clockBusy || !activeStaffUser}
+                  className={`w-full font-bold py-3.5 rounded-xl text-sm transition flex items-center justify-center gap-2 disabled:opacity-50 ${
+                    myClockToday
+                      ? 'bg-amber-600 hover:bg-amber-700 text-white'
+                      : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                  }`}
+                >
+                  <Clock className="w-4 h-4" />
+                  <span>
+                    {clockBusy
+                      ? 'กำลังตรวจสอบตำแหน่ง…'
+                      : myClockToday ? 'ลงชื่อออกงาน' : 'ลงชื่อเข้างาน'}
+                  </span>
+                </button>
+              )}
+
+              <p className="text-[10px] text-neutral-400 font-medium flex items-center justify-center gap-1">
+                <MapPin className="w-3 h-3" />
+                <span>ลงเวลาได้เฉพาะเมื่ออยู่ในพื้นที่ร้าน (รัศมี 50 ม.) — ต้องอนุญาตการเข้าถึงตำแหน่ง</span>
+              </p>
+            </div>
+
+            {/* MY RECENT HISTORY */}
+            {myRecords.length > 0 && (
+              <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs">
+                <div className="px-4 pt-3 pb-1 text-[10px] font-extrabold text-neutral-400 uppercase tracking-wider">ประวัติล่าสุดของฉัน</div>
+                <div className="divide-y divide-neutral-100">
+                  {myRecords.map((r) => (
+                    <div key={r.id} className="px-4 py-2.5 flex justify-between items-center text-xs font-thai">
+                      <span className="font-bold text-neutral-700">
+                        {new Date(r.inAt).toLocaleDateString('th-TH', { day: 'numeric', month: 'short' })}
+                      </span>
+                      <span className="font-mono text-neutral-500">
+                        {clockFmt(r.inAt)} → {clockFmt(r.outAt)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      }
+
       case 'qrcode':
         const urlToPrint = settings.baseUrl || window.location.origin + window.location.pathname;
         return (
@@ -1061,6 +1370,7 @@ function StaffView({
           { id: 'take-order', label: 'รับออเดอร์โต๊ะ', icon: PlusCircle },
           { id: 'tables', label: 'ผัง/เช็คบิลโต๊ะ', icon: LayoutGrid },
           { id: 'stock', label: isDay ? 'คลังวัตถุดิบ' : 'คลังเครื่องดื่ม', icon: Package },
+          { id: 'timeclock', label: 'ลงเวลา', icon: Clock },
           { id: 'qrcode', label: 'โต๊ะ & QR', icon: QrCode }
         ].map(tab => {
           const Icon = tab.icon;
@@ -1442,6 +1752,86 @@ function StaffView({
                 </button>
               </div>
             </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* PAY MODAL — choose cash / PromptPay QR, then settle. Bills are only
+          marked paid when staff confirms; backing out of the QR view (customer
+          changed their mind, scan failed) leaves everything untouched. */}
+      {payModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-admin-card rounded-3xl max-w-xs w-full p-6 space-y-4 text-neutral-800 shadow-2xl border border-neutral-100 text-center">
+
+            {payModal.step === 'method' ? (
+              <>
+                <div className="flex justify-between items-center text-left">
+                  <h3 className="text-base font-extrabold font-kanit text-neutral-800">
+                    เช็คบิล โต๊ะ {payModal.table}
+                  </h3>
+                  <button
+                    onClick={() => setPayModal(null)}
+                    className="p-1.5 rounded-full bg-neutral-100 hover:bg-neutral-200 text-neutral-500 transition"
+                  >
+                    <X className="w-4.5 h-4.5" />
+                  </button>
+                </div>
+                <p className="text-3xl font-extrabold font-mono text-amber-700">
+                  ฿{payModal.total.toLocaleString()}
+                </p>
+                <p className="text-[11px] text-neutral-400 font-thai">เลือกวิธีรับชำระเงิน</p>
+                <button
+                  onClick={() => { settleBills(payModal.billIds, payModal.table, 'cash'); setPayModal(null); }}
+                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl text-sm transition"
+                >
+                  💵 เงินสด
+                </button>
+                <button
+                  disabled={!settings.promptpayId}
+                  onClick={() => setPayModal({ ...payModal, step: 'qr' })}
+                  className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-neutral-300 disabled:cursor-not-allowed text-white font-bold py-3 rounded-xl text-sm transition flex items-center justify-center gap-1.5"
+                >
+                  <QrCode className="w-4 h-4" />
+                  QR Code (พร้อมเพย์)
+                </button>
+                {!settings.promptpayId && (
+                  <p className="text-[10px] text-red-500 font-thai">
+                    ยังไม่ได้ตั้งเบอร์พร้อมเพย์ร้าน — ตั้งได้ที่หน้าเจ้าของร้าน → ตั้งค่า
+                  </p>
+                )}
+              </>
+            ) : (
+              <>
+                <h3 className="text-base font-extrabold font-kanit text-neutral-800">
+                  สแกนจ่าย โต๊ะ {payModal.table}
+                </h3>
+                <div className="bg-white p-3 rounded-2xl border border-neutral-200 inline-block shadow-inner">
+                  <QRCodeSVG
+                    value={generatePayload(settings.promptpayId, { amount: payModal.total })}
+                    size={210}
+                  />
+                </div>
+                <p className="text-2xl font-extrabold font-mono text-blue-700">
+                  ฿{payModal.total.toLocaleString()}
+                </p>
+                <p className="text-[11px] text-neutral-400 font-thai leading-normal">
+                  ยอดเงินถูกฝังใน QR แล้ว ลูกค้าสแกนด้วยแอปธนาคารได้เลย
+                </p>
+                <button
+                  onClick={() => { settleBills(payModal.billIds, payModal.table, 'qr'); setPayModal(null); }}
+                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl text-sm transition"
+                >
+                  ✓ ได้รับเงินแล้ว — ปิดบิล
+                </button>
+                <button
+                  onClick={() => setPayModal({ ...payModal, step: 'method' })}
+                  className="w-full text-neutral-400 hover:text-neutral-600 text-xs font-bold py-1 transition"
+                >
+                  ← กลับไปเลือกวิธีจ่าย
+                </button>
+              </>
+            )}
 
           </div>
         </div>

@@ -61,6 +61,22 @@ export async function createStockItem({ category, name, quantity, imageUrl }) {
   return inserted.rows[0];
 }
 
+// Deduct `qty` from the row whose name matches the dish (or restore it when
+// `qty` is negative — un-serving a mis-tap). Same LOWER(TRIM(...)) match as
+// createStockItem, so the dish↔stock link stays name-based end to end. Never
+// below 0. Returns the updated row, or null when no row matches — a dish with
+// no linked stock is simply a no-op.
+export async function consumeStockByName(name, qty) {
+  const { rows } = await getPool().query(
+    `UPDATE stock_items
+     SET quantity = GREATEST(0, quantity - $2)
+     WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
+     RETURNING id, category, name, quantity, image_url AS "imageUrl"`,
+    [name, qty]
+  );
+  return rows[0] || null;
+}
+
 // Add `delta` (may be negative) to one item's quantity, never dropping below 0.
 // Returns the updated row, or null if the id matched nothing.
 export async function adjustStockItem(id, delta) {

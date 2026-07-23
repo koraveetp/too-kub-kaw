@@ -158,6 +158,18 @@ export async function createStockItem({ category, name, quantity, imageUrl }) {
   return item;
 }
 
+// Deduct qty from the stock row matching a dish name (negative qty restores).
+// Fired when staff mark a dish เสิร์ฟแล้ว. Returns the updated row, or null if
+// no stock row carries that name (the dish just isn't stock-linked).
+export async function consumeStockByName(name, qty) {
+  const { item } = await authedJson('/api/stock-items/consume', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, qty }),
+  });
+  return item;
+}
+
 // Bump every item by delta ("เติมทั้งหมด"). Returns how many rows changed.
 export async function restockAllStock(delta) {
   const { changed } = await authedJson('/api/stock-items/restock', {
@@ -166,6 +178,39 @@ export async function restockAllStock(delta) {
     body: JSON.stringify({ delta }),
   });
   return changed;
+}
+
+// --- Time clock (ลงเวลาเข้า-ออกงาน) -----------------------------------------
+// Send the browser's GPS position; the server geofences it against the shop and
+// stamps its own clock. First call today = clock-in, second = clock-out.
+// Returns { action: 'in' | 'out', record }.
+export async function clockTime({ lat, lng }) {
+  const { action, record } = await authedJson('/api/timeclock/clock', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lat, lng }),
+  });
+  return { action, record };
+}
+
+// Owner backfill: create/correct a staff member's in-out for one day. `inAt`/
+// `outAt` are epoch ms (outAt may be null). Staff session required.
+export async function manualTimeclock({ user, date, inAt, outAt }) {
+  const { record } = await authedJson('/api/timeclock/manual', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user, date, inAt, outAt }),
+  });
+  return record;
+}
+
+// Owner sets one staff member's monthly payroll status ('paid' | 'unpaid').
+export async function setPayrollStatus({ user, month, status }) {
+  await authedJson('/api/timeclock/payroll', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user, month, status }),
+  });
 }
 
 // Resolve a stored image value into something an <img src> can use.

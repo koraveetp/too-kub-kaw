@@ -40,7 +40,6 @@ function CustomerView({
   orders,
   setOrders,
   stock,
-  setStock,
   cart,
   setCart,
   addons,
@@ -231,14 +230,9 @@ function CustomerView({
       return;
     }
 
-    // Deduct stock
-    const updatedStock = { ...stock };
-    cart.forEach(cartItem => {
-      if (cartItem.stockRef && updatedStock[cartItem.stockRef]) {
-        updatedStock[cartItem.stockRef].count -= cartItem.qty;
-      }
-    });
-    setStock(updatedStock);
+    // Stock is NOT deducted here — it comes off only when staff mark each dish
+    // เสิร์ฟแล้ว (สำเร็จ). We carry `stockRef` onto the order item so the serve
+    // action knows what to subtract by the ordered qty.
 
     // Create new order/bill
     const orderNo = '#' + String(orders.length + 1).padStart(3, '0');
@@ -262,7 +256,8 @@ function CustomerView({
         addonCost: item.addonCost,
         addOns: item.addons,
         addOnsEn: item.addonsEn,
-        note: item.note
+        note: item.note,
+        stockRef: item.stockRef || null
       })),
       total: cartTotal,
       status: 'new', // new -> cooking -> served -> paid
@@ -293,28 +288,6 @@ function CustomerView({
     )
     .sort((a, b) => b.createdAt - a.createdAt);
 
-  const getStatusLabel = (status) => {
-    switch (status) {
-      case 'new': return t('ได้รับรายการแล้ว', 'Order received');
-      case 'cooking': return t('กำลังปรุงร้อนๆ', 'Cooking');
-      case 'served': return t('เสิร์ฟเสร็จแล้ว', 'Served');
-      case 'paid': return t('ชำระเงินเรียบร้อย', 'Paid');
-      case 'cancelled': return t('ยกเลิกออเดอร์', 'Cancelled');
-      default: return status;
-    }
-  };
-
-  const getStatusColor = (status) => {
-    switch (status) {
-      case 'new': return 'bg-[#FDECC8] text-[#8a5a00]';
-      case 'cooking': return 'bg-[#DCE9F7] text-[#2F5D8A]';
-      case 'served': return 'bg-[#DFF0E3] text-[#2C6E49]';
-      case 'paid': return 'bg-[#E9E5DB] text-[#6b6656]';
-      case 'cancelled': return 'bg-[#F6DAD7] text-[#9a2c22]';
-      default: return 'bg-neutral-100 text-neutral-600';
-    }
-  };
-
   return (
     <div className="space-y-4 font-thai text-sm">
 
@@ -330,7 +303,7 @@ function CustomerView({
       {showStatusList ? (
         <div className="space-y-4">
           <div className="flex justify-between items-center p-2 rounded-xl bg-strip-soft">
-            <h2 className="font-extrabold text-base font-kanit">{t('สถานะสั่งซื้อ โต๊ะ', 'Order status · Table')} {tableNo}</h2>
+            <h2 className="font-extrabold text-base font-kanit">{t('ประวัติการสั่ง โต๊ะ', 'Order history · Table')} {tableNo}</h2>
             <button
               onClick={() => setShowStatusList(false)}
               className="text-xs px-3 py-1.5 font-bold rounded-lg border transition-all bg-raised hover:bg-raised-hover border-line-strong text-ink"
@@ -353,9 +326,6 @@ function CustomerView({
 
                   <div className="flex justify-between items-center border-b pb-2 mb-2 border-dashed border-line-strong">
                     <span className="font-mono font-bold text-xs text-ink-2">{order.no}</span>
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${getStatusColor(order.status)}`}>
-                      {getStatusLabel(order.status)}
-                    </span>
                   </div>
 
                   <div className="space-y-1.5">
@@ -468,6 +438,14 @@ function CustomerView({
             </div>
           </div>
 
+          {/* OFF-MENU NOTICE — anything not on the menu, just tell the staff */}
+          <div className="rounded-2xl p-3.5 flex items-center gap-3 bg-card border border-line">
+            <span className="w-11 h-11 rounded-full flex items-center justify-center text-xl bg-amber-100 flex-shrink-0">🛎️</span>
+            <p className="text-[13px] font-semibold text-ink leading-relaxed">
+              {t('หากต้องการสั่งอะไรนอกเหนือจากเมนู โปรดเเจ้งพนักงาน 😊', 'Want something not on the menu? Just let our staff know!')}
+            </p>
+          </div>
+
           {/* MENU SECTIONS */}
           {sections.length > 0 ? (
             sections.map(section => (
@@ -529,7 +507,7 @@ function CustomerView({
               onClick={() => setShowStatusList(true)}
               className="text-xs font-extrabold hover:underline text-link"
             >
-              ตรวจสอบประวัติการสั่งและสถานะออเดอร์ของโต๊ะนี้ →
+              ตรวจสอบประวัติการสั่งของโต๊ะนี้ →
             </button>
           </div>
 
