@@ -75,6 +75,10 @@ const RESOURCES = ['orders', 'menu', 'stock', 'staff', 'settings', 'expenses', '
 // appends an order AND decrements stock from the browser. `expenses` is
 // owner-only bookkeeping, so it stays protected.
 const PROTECTED_RESOURCES = new Set(['menu', 'staff', 'settings', 'expenses']);
+// A stricter subset of the protected resources that only an *owner* may write:
+// staff accounts, shop settings, and the owner's expense bookkeeping. A plain
+// staff session is rejected with 403.
+const OWNER_RESOURCES = new Set(['staff', 'settings', 'expenses']);
 // Server-owned resources: readable by everyone via /api/state, but never
 // replaceable wholesale through PUT — records are only appended/updated by the
 // server's own endpoints, so timestamps can't be forged from a browser.
@@ -229,19 +233,43 @@ async function persistOrdersToDb() {
 
 // A copy of the state that is safe to send to a browser: staff objects keep
 // their username and display name but never their password hash.
-function sanitizeState(s) {
+// The view of the shared state a given caller is allowed to see. `session` is
+// the verified token payload ({ user, ... }) or null. Access level is read from
+// the LIVE staff record (not the token) so a demoted account loses access at
+// once. Three tiers:
+//   * public / customer (no session): storefront data only — menu, stock,
+//     orders, settings, addons, choices.
+//   * any signed-in staff: the above + the time clock (for the clock-in tab).
+//   * owner: everything, including staff HR (wages/positions), the expense book
+//     and payroll.
+// Password material is stripped for everyone. This is what stops a diner on the
+// shop WiFi from reading salaries/expenses off the public /api/state.
+function sanitizeState(s, session = null) {
+  const account = session && (s.staff || []).find((a) => a.user === session.user);
+  const isAuthed = !!account;
+  const isOwner = account?.role === 'owner';
   return {
     ...s,
-    staff: (s.staff || []).map(({ passHash, pass, ...rest }) => rest),
+    staff: isOwner
+      ? (s.staff || []).map(({ passHash, pass, ...rest }) => rest)
+      : [],
+    timeclock: isAuthed ? s.timeclock : [],
+    expenses: isOwner ? s.expenses : [],
+    payroll: isOwner ? s.payroll : {},
   };
 }
 
 // --- Real-time (SSE) broadcasting ------------------------------------------
+// Each client is { res, session } so every open stream is sent only the slice
+// of state its session is allowed to see (see sanitizeState). One customer and
+// one owner on the same broadcast get different payloads.
 const clients = new Set();
 
 function broadcast() {
-  const payload = `event: state\ndata: ${JSON.stringify(sanitizeState(state))}\n\n`;
-  for (const res of clients) res.write(payload);
+  for (const client of clients) {
+    const payload = `event: state\ndata: ${JSON.stringify(sanitizeState(state, client.session))}\n\n`;
+    client.res.write(payload);
+  }
 }
 
 // --- Live menu sync from PostgreSQL ----------------------------------------
@@ -399,6 +427,22 @@ function requireAuth(req, res, next) {
   next();
 }
 
+// Owner-only guard. The role is read from the *current* staff record (not just
+// the token) so an account demoted from owner loses access immediately, even on
+// a token that was signed while it was still an owner.
+function requireOwner(req, res, next) {
+  const session = getSession(req);
+  if (!session) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+  const account = (state.staff || []).find((s) => s.user === session.user);
+  if (!account || account.role !== 'owner') {
+    return res.status(403).json({ error: 'ต้องเป็นเจ้าของร้านเท่านั้น' });
+  }
+  req.session = session;
+  next();
+}
+
 // Very small in-memory rate limiter for the login endpoint, so the password
 // hash can't be brute-forced from a single IP. Not a substitute for a real
 // WAF, but stops the trivial case.
@@ -464,26 +508,31 @@ app.use('/uploads', express.static(UPLOAD_DIR, {
 
 // --- Routes -----------------------------------------------------------------
 
-// Full snapshot of the shared state (credentials stripped).
-app.get('/api/state', (_req, res) => {
-  res.json(sanitizeState(state));
+// Snapshot of the shared state, scoped to the caller's access (Bearer token).
+app.get('/api/state', (req, res) => {
+  res.json(sanitizeState(state, getSession(req)));
 });
 
 // Live stream: sends the current state on connect, then again on every change.
+// EventSource cannot set an Authorization header, so the session token rides as
+// a ?token= query param. Absent/invalid ⇒ the public view (customers connect
+// here too), never a rejection.
 app.get('/api/events', (req, res) => {
+  const session = verifyToken(String(req.query.token || '')) || null;
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     Connection: 'keep-alive',
   });
-  res.write(`event: state\ndata: ${JSON.stringify(sanitizeState(state))}\n\n`);
+  res.write(`event: state\ndata: ${JSON.stringify(sanitizeState(state, session))}\n\n`);
   // Comment ping keeps proxies/browsers from closing an idle connection.
   const ping = setInterval(() => res.write(': ping\n\n'), 25000);
 
-  clients.add(res);
+  const client = { res, session };
+  clients.add(client);
   req.on('close', () => {
     clearInterval(ping);
-    clients.delete(res);
+    clients.delete(client);
   });
 });
 
@@ -509,8 +558,12 @@ app.post('/api/login', (req, res) => {
     return res.status(401).json({ error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
   }
 
-  const token = signToken({ user: account.user });
-  res.json({ token, user: account.user, name: account.name });
+  // The token carries the role/shop so the frontend can route straight to the
+  // right panel; owner-only endpoints re-check the role against the live record.
+  const role = account.role === 'owner' ? 'owner' : 'staff';
+  const shop = account.shop === 'night' ? 'night' : 'day';
+  const token = signToken({ user: account.user, role, shop });
+  res.json({ token, user: account.user, name: account.name, role, shop, position: account.position || '' });
 });
 
 // Reduce the incoming staff array to safe, hashed records. New accounts must
@@ -542,8 +595,12 @@ function normalizeStaffWrite(incoming) {
     const position = String(raw?.position ?? existing?.position ?? '').trim().slice(0, 100);
     const dailyWage = Math.max(0, Number(raw?.dailyWage ?? existing?.dailyWage) || 0);
     const shop = ['day', 'night'].includes(raw?.shop) ? raw.shop : (existing?.shop || 'day');
+    // Access level: 'owner' (เจ้าของ — back-office panel) | 'staff' (พนักงาน —
+    // shift board only). Defaults to 'staff' so a new account is never
+    // accidentally granted owner access.
+    const role = ['owner', 'staff'].includes(raw?.role) ? raw.role : (existing?.role || 'staff');
 
-    out.push({ user, name, passHash, position, dailyWage, shop });
+    out.push({ user, name, passHash, position, dailyWage, shop, role });
   }
   if (!out.length) throw new Error('at least one staff account is required');
   return out;
@@ -593,6 +650,16 @@ app.put('/api/:resource', (req, res) => {
 
   if (PROTECTED_RESOURCES.has(resource) && !getSession(req)) {
     return res.status(401).json({ error: 'Authentication required' });
+  }
+
+  // Editing staff accounts or shop settings is an owner-only action, even though
+  // both are "protected" resources a plain staff session could otherwise write.
+  if (OWNER_RESOURCES.has(resource)) {
+    const session = getSession(req);
+    const account = session && (state.staff || []).find((s) => s.user === session.user);
+    if (!account || account.role !== 'owner') {
+      return res.status(403).json({ error: 'ต้องเป็นเจ้าของร้านเท่านั้น' });
+    }
   }
 
   if (resource === 'staff') {
@@ -671,7 +738,7 @@ app.post('/api/timeclock/clock', requireAuth, (req, res) => {
 // to clock (or clocked wrong). Auth required, no geofence — this is a manual
 // admin action. `date` is YYYY-MM-DD; `inAt`/`outAt` are epoch ms (outAt may be
 // null). Upserts the single record for that user+date.
-app.post('/api/timeclock/manual', requireAuth, (req, res) => {
+app.post('/api/timeclock/manual', requireOwner, (req, res) => {
   const user = String(req.body?.user || '').trim();
   const date = String(req.body?.date || '').trim();
   const inAt = req.body?.inAt == null ? null : Number(req.body.inAt);
@@ -712,7 +779,7 @@ app.post('/api/timeclock/manual', requireAuth, (req, res) => {
 
 // Owner sets a staff member's monthly payroll status ('paid' | 'unpaid').
 // Keyed "user__YYYY-MM". Auth required.
-app.post('/api/timeclock/payroll', requireAuth, (req, res) => {
+app.post('/api/timeclock/payroll', requireOwner, (req, res) => {
   const user = String(req.body?.user || '').trim();
   const month = String(req.body?.month || '').trim();
   const status = req.body?.status === 'paid' ? 'paid' : 'unpaid';
@@ -783,7 +850,8 @@ function parseMenuItemBody(body) {
   const type = str(body?.type) || 'เมนูหลัก';
   const subcategory = str(body?.subcategory);
   const name = str(body?.name);
-  const theme = str(body?.theme) === 'night' ? 'night' : 'day';
+  const rawTheme = str(body?.theme);
+  const theme = ['day', 'night', 'both'].includes(rawTheme) ? rawTheme : 'day';
   const imageUrl = str(body?.imageUrl);
 
   if (!name) return { error: 'กรุณากรอกชื่อรายการ' };

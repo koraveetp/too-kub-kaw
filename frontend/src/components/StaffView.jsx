@@ -20,8 +20,6 @@ import {
   Check,
   Edit,
   X,
-  Sun,
-  Moon,
   Clock,
   MapPin,
   LogIn,
@@ -52,9 +50,12 @@ function StaffView({
   // Checkout dialog: choose cash / PromptPay QR before a bill is settled.
   // { table, billIds (oldest→newest), total, step: 'method' | 'qr' } | null
   const [payModal, setPayModal] = useState(null);
-  // Which shift's orders the board shows + notifies for. Defaults to the active
-  // menu/theme, so staff see the shift matching the menu currently being served.
-  const [shiftView, setShiftView] = useState(theme);
+  // Which shift's orders the board shows + notifies for. This is LOCKED to the
+  // logged-in staff member's own shift: App pins `theme` to their shop (day /
+  // night) and hides the theme toggle, so a day-shift worker only ever sees the
+  // day menu + day bills, and a night worker only the night side. There is no
+  // switcher — hence a plain const, not state.
+  const shiftView = theme;
   
   // Direct ordering states
   const [targetTable, setTargetTable] = useState('1');
@@ -188,7 +189,7 @@ function StaffView({
   }, [orders, shiftView]);
 
   const isDay = theme === 'day';
-  const filteredMenu = menu.filter(item => item.theme === theme);
+  const filteredMenu = menu.filter(item => item.theme === theme || item.theme === 'both');
   const categories = [...new Set(filteredMenu.map(item => item.category))];
 
   if (categories.length > 0 && !directCat) {
@@ -762,29 +763,8 @@ function StaffView({
         const filteredOrders = getFilteredOrders();
         return (
           <div className="space-y-4">
-            {/* SHIFT SELECTOR — screens the board (and notifications) by shift */}
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400">กะที่แสดง</span>
-              <div className="flex gap-1 bg-neutral-100 rounded-xl p-1 text-[11px] font-bold">
-                {[
-                  { k: 'day', l: 'กลางวัน', icon: Sun },
-                  { k: 'night', l: 'กลางคืน', icon: Moon }
-                ].map(s => {
-                  const Icon = s.icon;
-                  return (
-                    <button
-                      key={s.k}
-                      onClick={() => setShiftView(s.k)}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition ${s.k === shiftView ? 'bg-admin-field text-neutral-800 shadow-xs' : 'text-neutral-500 hover:text-neutral-700'}`}
-                    >
-                      <Icon className="w-3.5 h-3.5" />
-                      <span>{s.l}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
+            {/* The board is locked to this staff member's own shift (day/night);
+                there is deliberately no shift switcher. */}
             <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
               {[
                 { k: 'active', l: 'กำลังทำงาน (ค้างชำระ)' },
@@ -1294,43 +1274,49 @@ function StaffView({
           <div className="space-y-4">
             <div className="border-l-4 border-amber-600 pl-2">
               <h2 className="font-extrabold text-sm font-kanit uppercase tracking-wider text-neutral-400">พิมพ์/บันทึก QR Code ประจำโต๊ะ</h2>
+              <span className="text-[10px] text-neutral-400 font-medium">แต่ละโต๊ะมี 2 QR แยกกลางวัน/กลางคืน — สแกนอันไหนล็อกกะนั้นทันที</span>
             </div>
-            
+
             <div className="grid grid-cols-1 gap-4">
               {Array.from({ length: settings.tables }, (_, i) => {
                 const table = i + 1;
-                const qrUrl = `${urlToPrint}?table=${table}`;
-                const qrImageSrc = `https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(qrUrl)}`;
-                
+                // Two explicit links per table: the day storefront and the night
+                // bar. The customer app locks the shift from whichever it scans.
+                const variants = [
+                  { key: 'day', label: 'กลางวัน', url: `${urlToPrint}?table-day=${table}`, tone: 'bg-amber-100 text-amber-800' },
+                  { key: 'night', label: 'กลางคืน', url: `${urlToPrint}?table-night=${table}`, tone: 'bg-indigo-100 text-indigo-800' },
+                ];
+
                 return (
-                  <div 
+                  <div
                     key={table}
-                    className="bg-admin-card border border-neutral-200 rounded-2xl p-4 text-center shadow-xs flex flex-col items-center justify-center space-y-2.5 max-w-xs mx-auto w-full"
+                    className="bg-admin-card border border-neutral-200 rounded-2xl p-4 shadow-xs max-w-xs mx-auto w-full space-y-3"
                   >
-                    <b className="font-kanit text-neutral-800 text-sm">โต๊ะให้บริการหมายเลข {table}</b>
-                    
-                    {/* QR Code Container */}
-                    <div className="w-44 h-44 bg-neutral-50 rounded-xl border flex items-center justify-center p-3 relative shadow-inner">
-                      <img 
-                        src={qrImageSrc} 
-                        className="w-full h-full object-contain"
-                        alt={`QR Code Table ${table}`}
-                      />
+                    <b className="font-kanit text-neutral-800 text-sm block text-center">โต๊ะให้บริการหมายเลข {table}</b>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      {variants.map((v) => {
+                        const src = `https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(v.url)}`;
+                        return (
+                          <div key={v.key} className="flex flex-col items-center space-y-1.5">
+                            <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${v.tone}`}>{v.label}</span>
+                            <div className="w-full aspect-square bg-neutral-50 rounded-xl border flex items-center justify-center p-2 shadow-inner">
+                              <img src={src} className="w-full h-full object-contain" alt={`QR โต๊ะ ${table} ${v.label}`} />
+                            </div>
+                            <p className="text-[9px] text-neutral-400 font-mono break-all text-center leading-tight">{v.url}</p>
+                            <a
+                              href={src}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1 text-[9px] bg-neutral-100 hover:bg-neutral-200 border text-neutral-700 font-bold px-2 py-1 rounded-lg transition"
+                            >
+                              <QrCode className="w-3 h-3" />
+                              <span>ดาวน์โหลด</span>
+                            </a>
+                          </div>
+                        );
+                      })}
                     </div>
-                    
-                    <p className="text-[10px] text-neutral-400 font-mono truncate w-full text-center max-w-[240px]">
-                      {qrUrl}
-                    </p>
-                    
-                    <a 
-                      href={qrImageSrc} 
-                      target="_blank" 
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1.5 text-[10px] bg-neutral-100 hover:bg-neutral-200 border text-neutral-700 font-bold px-3.5 py-1.5 rounded-xl transition"
-                    >
-                      <QrCode className="w-3.5 h-3.5" />
-                      <span>เปิดดาวน์โหลด QR รูปขนาดใหญ่</span>
-                    </a>
                   </div>
                 );
               })}

@@ -108,7 +108,8 @@ function stripTrailingProtein(name, protein) {
 // Which menu a row belongs to. The database's `theme` column decides; rows from
 // a source that has no such column (or an un-migrated table) are daytime.
 function rowTheme(row) {
-  return text(row?.theme) === 'night' ? 'night' : 'day';
+  const t = text(row?.theme);
+  return t === 'night' || t === 'both' ? t : 'day';
 }
 
 // Stable, readable id derived from the dish identity rather than row position,

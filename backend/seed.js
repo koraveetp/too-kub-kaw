@@ -107,13 +107,19 @@ export const SEED = {
     ST03: { name: 'วิสกี้พรีเมียม (ช็อต)', count: 45, min: 15, theme: 'night' },
     ST04: { name: 'โซดาเกลือหิมะ', count: 2, min: 12, theme: 'night' }
   },
+  // Test accounts for trialling the role split. `role` decides which panel a
+  // login lands on ('owner' → back office, 'staff' → shift board); `shop`
+  // decides which shift (day/night) a staff account defaults to.
   staff: [
-    { user: 'admin', pass: '1234', name: 'ผู้จัดการร้าน' }
+    { user: 'admin', pass: '1234', name: 'เจ้าของร้าน', role: 'owner', shop: 'day', position: 'เจ้าของ', dailyWage: 0 },
+    { user: 'day', pass: '1234', name: 'พนักงานกลางวัน', role: 'staff', shop: 'day', position: 'หน้าร้าน', dailyWage: 350 },
+    { user: 'night', pass: '1234', name: 'พนักงานกลางคืน', role: 'staff', shop: 'night', position: 'บาร์', dailyWage: 400 },
+    { user: 'cook', pass: '1234', name: 'แม่ครัว', role: 'staff', shop: 'day', position: 'ครัว', dailyWage: 450 }
   ],
   settings: {
     name: 'ตู้กับข้าวบ้านยาย',
     nameNight: 'เรือนเก่า',
-    tables: 12,
+    tables: 9,
     baseUrl: ''
   },
   // Owner-recorded outgoings (rent, ingredients, wages...). Each entry is

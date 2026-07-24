@@ -28,6 +28,11 @@ const THEMES = [
   { id: 'day', label: 'เมนูกลางวัน' },
   { id: 'night', label: 'เมนูกลางคืน' },
 ];
+const FORM_THEMES = [
+  { id: 'day', label: 'กลางวัน' },
+  { id: 'night', label: 'กลางคืน' },
+  { id: 'both', label: 'ทั้งสอง' },
+];
 
 const EMPTY_FORM = {
   category: '',
@@ -135,7 +140,7 @@ function OwnerMenu({ menu, showToast }) {
   }, [showForm]);
 
   const themeMenu = useMemo(
-    () => (menu || []).filter((m) => (m.theme || 'day') === theme),
+    () => (menu || []).filter((m) => (m.theme || 'day') === theme || m.theme === 'both'),
     [menu, theme]
   );
 
@@ -344,7 +349,7 @@ function OwnerMenu({ menu, showToast }) {
           <div>
             <label className="block font-bold text-neutral-500 mb-1">กะที่ขาย</label>
             <div className="flex gap-1.5 bg-admin-card border rounded-xl p-1">
-              {THEMES.map((t) => (
+              {(formMode === 'menu' ? FORM_THEMES : THEMES).map((t) => (
                 <button
                   key={t.id}
                   type="button"

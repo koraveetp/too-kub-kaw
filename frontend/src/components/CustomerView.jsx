@@ -102,7 +102,7 @@ function CustomerView({
   const isAvailable = (dish) => dish.available && !soldOutNames.has(normName(dish.name));
 
   // Filter menu items for current theme
-  const filteredMenu = menu.filter(item => item.theme === theme);
+  const filteredMenu = menu.filter(item => item.theme === theme || item.theme === 'both');
 
   const itemsToShow = filteredMenu.filter(item =>
     activeGroup === 'drink' ? isDrinkItem(item) : !isDrinkItem(item)

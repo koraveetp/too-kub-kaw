@@ -26,45 +26,56 @@ function OwnerSummary({ orders, expenses, showToast }) {
   const rows = useMemo(() => summaryRows(orders, expenses, month), [orders, expenses, month]);
   const totals = useMemo(() => summaryTotals(rows), [rows]);
 
-  const handleExport = () => {
-    if (rows.length === 0) {
-      alert('เดือนนี้ยังไม่มีข้อมูลสำหรับส่งออก');
-      return;
-    }
+  // The same month totals, but split by shift so day and night can be checked
+  // side by side. Each shift also carries its own rows for the per-sheet export.
+  const byShift = useMemo(() => {
+    const make = (id) => {
+      const shopRows = rows.filter((r) => r.shop === id);
+      return { id, rows: shopRows, ...summaryTotals(shopRows) };
+    };
+    return { day: make('day'), night: make('night') };
+  }, [rows]);
 
-    const sheet = rows.map((r) => ({
+  // Turn a set of summary rows into the sheet shape, with trailing totals so each
+  // sheet balances on its own.
+  const buildSheet = (sheetRows) => {
+    const t = summaryTotals(sheetRows);
+    const body = sheetRows.map((r) => ({
       'วันที่': shortDate(r.date),
       'ร้าน': shopLabel(r.shop),
       'ประเภท': r.kind === 'income' ? 'รายรับ' : 'รายจ่าย',
       'รายการ': r.label,
       'จำนวนเงิน ฿': r.amount
     }));
-
-    // Trailing totals so the sheet balances on its own.
-    sheet.push({}, {
-      'วันที่': 'รวมทั้งเดือน',
-      'ร้าน': '',
-      'ประเภท': 'รายรับ',
-      'รายการ': '',
-      'จำนวนเงิน ฿': totals.income
+    body.push({}, {
+      'วันที่': 'รวมทั้งเดือน', 'ร้าน': '', 'ประเภท': 'รายรับ', 'รายการ': '', 'จำนวนเงิน ฿': t.income
     }, {
-      'วันที่': '',
-      'ร้าน': '',
-      'ประเภท': 'รายจ่าย',
-      'รายการ': '',
-      'จำนวนเงิน ฿': totals.expense
+      'วันที่': '', 'ร้าน': '', 'ประเภท': 'รายจ่าย', 'รายการ': '', 'จำนวนเงิน ฿': t.expense
     }, {
-      'วันที่': '',
-      'ร้าน': '',
-      'ประเภท': 'กำไรสุทธิ',
-      'รายการ': '',
-      'จำนวนเงิน ฿': totals.profit
+      'วันที่': '', 'ร้าน': '', 'ประเภท': 'กำไรสุทธิ', 'รายการ': '', 'จำนวนเงิน ฿': t.profit
     });
-
-    const ws = XLSX.utils.json_to_sheet(sheet);
+    const ws = XLSX.utils.json_to_sheet(body);
     ws['!cols'] = [{ wch: 12 }, { wch: 22 }, { wch: 10 }, { wch: 26 }, { wch: 14 }];
+    return ws;
+  };
+
+  const handleExport = () => {
+    if (rows.length === 0) {
+      alert('เดือนนี้ยังไม่มีข้อมูลสำหรับส่งออก');
+      return;
+    }
+
+    // One workbook, three tabs: everything together, then day and night on their
+    // own so each shift can be checked / handed off in isolation. Empty shifts
+    // are skipped rather than adding a blank tab.
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, monthLabel(month));
+    XLSX.utils.book_append_sheet(wb, buildSheet(rows), 'ทั้งหมด');
+    if (byShift.day.rows.length) {
+      XLSX.utils.book_append_sheet(wb, buildSheet(byShift.day.rows), 'กลางวัน');
+    }
+    if (byShift.night.rows.length) {
+      XLSX.utils.book_append_sheet(wb, buildSheet(byShift.night.rows), 'กลางคืน');
+    }
     XLSX.writeFile(wb, `สรุปยอด_${monthLabel(month).replace(/\s/g, '_')}.xlsx`);
     showToast('ส่งออกไฟล์ Excel สำเร็จ ✓');
   };
@@ -100,19 +111,34 @@ function OwnerSummary({ orders, expenses, showToast }) {
         </select>
       </div>
 
-      {/* MONTH TOTALS */}
-      <div className="grid grid-cols-3 gap-2 text-center">
-        <div className="bg-admin-card border rounded-2xl p-2.5 shadow-xs">
-          <span className="text-[9px] font-extrabold text-neutral-600 font-kanit block">รายรับ</span>
-          <span className="font-mono text-sm font-extrabold text-admin-income">{baht(totals.income)}</span>
+      {/* MONTH TOTALS — day vs night side by side, so each shift can be read on
+          its own and against the other, with a combined row underneath. */}
+      <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs">
+        <div className="grid grid-cols-[1.1fr_1fr_1fr_1fr] gap-1.5 px-3 py-2 bg-neutral-50 border-b text-[9.5px] font-extrabold text-neutral-500 font-kanit">
+          <span>กะ</span>
+          <span className="text-right">รายรับ</span>
+          <span className="text-right">รายจ่าย</span>
+          <span className="text-right">กำไรสุทธิ</span>
         </div>
-        <div className="bg-admin-card border rounded-2xl p-2.5 shadow-xs">
-          <span className="text-[9px] font-extrabold text-neutral-600 font-kanit block">รายจ่าย</span>
-          <span className="font-mono text-sm font-extrabold text-admin-expense">{baht(totals.expense)}</span>
-        </div>
-        <div className="bg-admin-card border rounded-2xl p-2.5 shadow-xs">
-          <span className="text-[9px] font-extrabold text-neutral-600 font-kanit block">กำไรสุทธิ</span>
-          <span className="font-mono text-sm font-extrabold text-neutral-800">{baht(totals.profit)}</span>
+        {[
+          { label: 'กลางวัน', t: byShift.day },
+          { label: 'กลางคืน', t: byShift.night }
+        ].map(({ label, t }) => (
+          <div
+            key={label}
+            className="grid grid-cols-[1.1fr_1fr_1fr_1fr] gap-1.5 px-3 py-2.5 border-b border-neutral-100 text-[11px] items-center font-thai"
+          >
+            <span className="font-bold text-neutral-800">{label}</span>
+            <span className="text-right font-mono font-bold text-admin-income">{baht(t.income)}</span>
+            <span className="text-right font-mono font-bold text-admin-expense">{baht(t.expense)}</span>
+            <span className="text-right font-mono font-extrabold text-neutral-800">{baht(t.profit)}</span>
+          </div>
+        ))}
+        <div className="grid grid-cols-[1.1fr_1fr_1fr_1fr] gap-1.5 px-3 py-2.5 bg-neutral-50 text-[11px] items-center font-thai">
+          <span className="font-extrabold text-neutral-800 font-kanit">รวมทั้งเดือน</span>
+          <span className="text-right font-mono font-extrabold text-admin-income">{baht(totals.income)}</span>
+          <span className="text-right font-mono font-extrabold text-admin-expense">{baht(totals.expense)}</span>
+          <span className="text-right font-mono font-extrabold text-neutral-800">{baht(totals.profit)}</span>
         </div>
       </div>
 

@@ -2,10 +2,11 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import CustomerView from './components/CustomerView';
 import StaffView from './components/StaffView';
 import OwnerView from './components/OwnerView';
+import LoginPage from './components/LoginPage';
 import { fetchState, saveResource, subscribeToState, login, setAuthToken } from './api';
 import { paletteStyle } from './admin-theme';
 import { shiftNow } from './shift';
-import { User, ShieldCheck, Key, LogOut, Sun, Moon, Smartphone, Languages } from 'lucide-react';
+import { ShieldCheck, Key, LogOut, Sun, Moon, Smartphone, Languages } from 'lucide-react';
 import logoImg from './assets/logo.jpg';
 
 const DEFAULT_MENU = [
@@ -89,10 +90,64 @@ const DEFAULT_SETTINGS = {
   adminColors: {}
 };
 
+// The saved login session (if any), shape { user, name, token, role, shop }.
+function readSession() {
+  try {
+    return JSON.parse(localStorage.getItem('session') || 'null');
+  } catch {
+    return null;
+  }
+}
+
+// A customer arrives via a table link. Three URL shapes are accepted:
+//   ?table-day=N   → table N, shift LOCKED to the day storefront
+//   ?table-night=N → table N, shift LOCKED to the night bar
+//   ?table=N       → table N, shift decided by the clock (shiftNow())
+// Returns { table:Number, shift:'day'|'night'|null } or null when none is
+// present (null shift means "let the clock decide"). This is the single source
+// of truth for how a QR scan maps to a table + shift.
+function readTableParam() {
+  const params = new URLSearchParams(window.location.search);
+  const num = (v) => {
+    const n = parseInt(v);
+    return !isNaN(n) && n > 0 ? n : null;
+  };
+  const day = num(params.get('table-day'));
+  if (day) return { table: day, shift: 'day' };
+  const night = num(params.get('table-night'));
+  if (night) return { table: night, shift: 'night' };
+  const plain = num(params.get('table'));
+  if (plain) return { table: plain, shift: null };
+  return null;
+}
+
 function App() {
-  const [theme, setTheme] = useState(() => localStorage.getItem('activeTheme') || 'day');
-  const [role, setRole] = useState(() => localStorage.getItem('currentRole') || 'customer');
-  const [tableNo, setTableNo] = useState(() => parseInt(localStorage.getItem('tableNo') || '1'));
+  const [theme, setTheme] = useState(() => {
+    // A customer arriving via a table QR is pinned to their shift from the very
+    // first frame — so a day diner never flashes the night palette (or vice-
+    // versa) from a stale saved theme. An explicit ?table-day / ?table-night
+    // link fixes the shift; a plain ?table falls back to the clock.
+    const tp = readTableParam();
+    if (tp) return tp.shift || shiftNow();
+    return localStorage.getItem('activeTheme') || 'day';
+  });
+  // The active screen. Access is decided up-front, not switchable at will:
+  //   • a table QR (…?table=N) is the ONLY way to become a 'customer';
+  //   • a saved login restores that account's own panel ('staff' | 'owner');
+  //   • everyone else lands on the 'login' page.
+  // This is what keeps each role boxed into its own view — there is no dropdown
+  // to hop between them anymore.
+  const [role, setRole] = useState(() => {
+    if (readTableParam()) return 'customer';
+    const session = readSession();
+    if (session?.role) return session.role === 'owner' ? 'owner' : 'staff';
+    return 'login';
+  });
+  const [tableNo, setTableNo] = useState(() => {
+    const tp = readTableParam();
+    if (tp) return tp.table;
+    return parseInt(localStorage.getItem('tableNo') || '1');
+  });
   // Customer-facing menu language ('th' | 'en'). Only the customer view reads
   // it; staff and owner panels stay Thai. Persisted so a foreign diner's choice
   // survives a page reload.
@@ -152,15 +207,11 @@ function App() {
   
   // App UX States
   const [cart, setCart] = useState([]);
-  const [activeStaffUser, setActiveStaffUser] = useState(() => {
-    const saved = localStorage.getItem('session');
-    return saved ? JSON.parse(saved)?.user || null : null;
-  });
-  const [showRoleDropdown, setShowRoleDropdown] = useState(false);
-  const [showLoginModal, setShowLoginModal] = useState(false);
-  const [loginUser, setLoginUser] = useState('');
-  const [loginPass, setLoginPass] = useState('');
-  const [loginRemember, setLoginRemember] = useState(true);
+  const [activeStaffUser, setActiveStaffUser] = useState(() => readSession()?.user || null);
+  // The logged-in account's access level ('owner' | 'staff') and home shop
+  // ('day' | 'night'), restored from the saved session so a refresh keeps them.
+  const [activeRole, setActiveRole] = useState(() => readSession()?.role || null);
+  const [activeShop, setActiveShop] = useState(() => readSession()?.shop || null);
   const [toast, setToast] = useState({ show: false, message: '' });
   // Recomputed only when the owner actually changes a colour.
   const adminPaletteStyle = useMemo(
@@ -173,14 +224,20 @@ function App() {
   const [loadState, setLoadState] = useState('loading');
   const [loadError, setLoadError] = useState('');
 
+  // A staff member is pinned to their own shift: the theme (which drives the
+  // menu, the bill board and the whole palette) is forced to their shop and the
+  // day/night toggle is hidden, so a day worker can never reach the night side
+  // (or dark mode) and vice-versa. Runs before the toggle can ever be shown.
+  useEffect(() => {
+    if (role === 'staff' && activeShop && theme !== activeShop) {
+      setTheme(activeShop);
+    }
+  }, [role, activeShop, theme]);
+
   // Per-tab UI preferences still live in localStorage (they are NOT shared).
   useEffect(() => {
     localStorage.setItem('activeTheme', theme);
   }, [theme]);
-
-  useEffect(() => {
-    localStorage.setItem('currentRole', role);
-  }, [role]);
 
   useEffect(() => {
     localStorage.setItem('tableNo', tableNo.toString());
@@ -190,10 +247,12 @@ function App() {
     localStorage.setItem('lang', lang);
   }, [lang]);
 
-  // Load the shared state from the backend once, then keep it live: the SSE
-  // stream pushes the newest state whenever ANY tab changes something. This is
+  // Load the shared state from the backend, then keep it live over SSE — this is
   // what lets a customer's order appear on the staff tab (and vice-versa) in
-  // real time across separate tabs.
+  // real time. It re-runs whenever the logged-in user changes (login/logout) so
+  // both the fetch and the stream carry the current session token, and the
+  // server re-scopes what it returns (an owner then starts receiving the gated
+  // expenses/payroll/time-clock data; a logout drops back to the public slice).
   useEffect(() => {
     const applyState = (s) => {
       if (s.orders) setOrdersLocal(s.orders);
@@ -224,24 +283,21 @@ function App() {
       setLoadState('ready');
     });
     return unsubscribe;
-  }, []);
+  }, [activeStaffUser]);
 
-  // Handle URL Table param
+  // Handle URL table param (?table / ?table-day / ?table-night)
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const t = params.get('table');
-    if (t) {
-      const num = parseInt(t);
-      if (!isNaN(num) && num > 0) {
-        setTableNo(num);
-        setRole('customer');
-        // A QR scan is a fresh customer arrival: show the shop that is actually
-        // open right now (by the clock), never a stale theme left in
-        // localStorage from a previous session — otherwise a daytime order
-        // could be stamped onto the night shift's board and bills.
-        setTheme(shiftNow());
-        showToast(`สแกนเข้าโต๊ะหมายเลข ${num} สำเร็จ`);
-      }
+    const tp = readTableParam();
+    if (tp) {
+      setTableNo(tp.table);
+      setRole('customer');
+      // A QR scan is a fresh customer arrival: an explicit ?table-day /
+      // ?table-night link fixes the shift; a plain ?table shows whichever shop
+      // is open right now (by the clock) — never a stale theme from a previous
+      // session, which could stamp a daytime order onto the night board/bills.
+      setTheme(tp.shift || shiftNow());
+      const suffix = tp.shift === 'day' ? ' (กลางวัน)' : tp.shift === 'night' ? ' (กลางคืน)' : '';
+      showToast(`สแกนเข้าโต๊ะหมายเลข ${tp.table}${suffix} สำเร็จ`);
     }
   }, []);
 
@@ -252,55 +308,50 @@ function App() {
     }, 2800);
   };
 
-  const handleLogin = async (e) => {
-    e.preventDefault();
-    try {
-      // The backend verifies the password against a hashed store and returns a
-      // signed session token; credentials are never checked in the browser.
-      const { token, user, name } = await login(loginUser, loginPass);
-      setActiveStaffUser(user);
-      // Persist the token so a refresh keeps the session. When "remember" is
-      // off we still need it in memory (setAuthToken already ran inside login()),
-      // just not on disk.
-      if (loginRemember) {
-        localStorage.setItem('session', JSON.stringify({ user, name, token }));
-      }
-      setRole('staff');
-      setShowLoginModal(false);
-      setLoginUser('');
-      setLoginPass('');
-      showToast(`พนักงาน ${name} เข้าสู่ระบบสำเร็จ`);
-    } catch (err) {
-      alert(err.message || 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
+  // Called by the login page. The backend verifies the password against a hashed
+  // store and returns the account's role/shop; we route straight to that panel
+  // and never anywhere else, so a staff login can't reach the owner board and
+  // vice-versa. Rejects (re-throws) so the login page can show the error inline.
+  const handleLogin = async (user, pass, remember) => {
+    // Verified server-side; credentials are never checked in the browser.
+    const { token, user: u, name, role: r, shop } = await login(user, pass);
+    const landRole = r === 'owner' ? 'owner' : 'staff';
+    const landShop = shop === 'night' ? 'night' : 'day';
+    setActiveStaffUser(u);
+    setActiveRole(landRole);
+    setActiveShop(landShop);
+    // Persist so a refresh keeps the session (setAuthToken already ran inside
+    // login(), so an un-remembered session still works in memory this tab).
+    if (remember) {
+      localStorage.setItem('session', JSON.stringify({ user: u, name, token, role: landRole, shop: landShop }));
     }
+    // Staff land on the shift matching their shop; the owner keeps the palette.
+    if (landRole === 'staff') setTheme(landShop);
+    setRole(landRole);
+    showToast(`${name} เข้าสู่ระบบสำเร็จ`);
   };
 
   const handleLogout = () => {
     setActiveStaffUser(null);
+    setActiveRole(null);
+    setActiveShop(null);
     setAuthToken(null);
     localStorage.removeItem('session');
-    setRole('customer');
-    showToast('ออกจากระบบพนักงานแล้ว');
+    // Back to the front door, NOT the customer menu (that needs a table QR).
+    setRole('login');
+    showToast('ออกจากระบบแล้ว');
   };
 
   // Called when the backend rejects a protected write because our session token
-  // is missing or expired. Clear the stale session and prompt a fresh login.
+  // is missing or expired. Clear the stale session and send back to login.
   const handleSessionExpired = () => {
     setActiveStaffUser(null);
+    setActiveRole(null);
+    setActiveShop(null);
     setAuthToken(null);
     localStorage.removeItem('session');
     showToast('เซสชันหมดอายุ กรุณาเข้าสู่ระบบอีกครั้ง');
-    setShowLoginModal(true);
-  };
-
-  const switchRole = (newRole, newTheme = 'day', table = 1) => {
-    setRole(newRole);
-    setTableNo(table);
-    if (newRole === 'customer') {
-      setTheme(newTheme);
-    }
-    setCart([]);
-    setShowRoleDropdown(false);
+    setRole('login');
   };
 
   const triggerPwa = () => {
@@ -365,10 +416,12 @@ function App() {
               </button>
             )}
 
-            {/* Quick theme toggler. Available in every role, not just the
-                customer view: the staff and owner panels follow the same
-                day/night palette, so anyone working a night shift can drop the
-                whole app into the dark theme. */}
+            {/* Quick theme toggler — the owner only. Both staff AND customers are
+                locked to their own shift's palette: a day diner/worker stays
+                light/day, a night one stays dark/night, and neither may flip the
+                background or cross into the other shift. A customer's shift is
+                pinned from the clock at QR-scan time. */}
+            {role === 'owner' && (
             <button
               onClick={() => setTheme(prev => prev === 'day' ? 'night' : 'day')}
               className={`w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 shadow-sm bg-raised hover:bg-raised-hover text-raised-ink ${theme === 'day' ? '' : 'border border-line-strong'}`}
@@ -376,97 +429,52 @@ function App() {
             >
               {theme === 'day' ? <Moon className="w-5 h-5" /> : <Sun className="w-4 h-4" />}
             </button>
+            )}
 
-            {/* Role Switcher Selector */}
-            <div className="relative">
-              <button
-                onClick={() => setShowRoleDropdown(prev => !prev)}
-                className={`flex items-center gap-1.5 rounded-full font-kanit font-semibold tracking-wide transition-all bg-raised hover:bg-raised-hover ${theme === 'day' ? 'text-raised-ink text-base px-5 py-2 shadow-sm' : 'border border-line-strong text-ink text-sm px-4 py-2'}`}
+            {/* Static role badge. There is intentionally no switcher: which panel
+                you see is fixed by how you arrived (QR scan → customer, or the
+                account you logged in as → staff / owner). */}
+            {role !== 'login' && (
+              <div
+                className={`flex items-center gap-1.5 rounded-full font-kanit font-semibold tracking-wide bg-raised ${theme === 'day' ? 'text-raised-ink text-base px-5 py-2 shadow-sm' : 'border border-line-strong text-ink text-sm px-4 py-2'}`}
               >
-                {theme !== 'day' && <User className="w-3.5 h-3.5 text-accent" />}
-                <span>
-                  {role === 'customer' ? `โต๊ะ ${tableNo}` : role === 'staff' ? 'พนักงาน' : 'ผู้บริหาร'}
-                </span>
-              </button>
-
-              {showRoleDropdown && (
-                <>
-                  <div className="fixed inset-0 z-40" onClick={() => setShowRoleDropdown(false)} />
-                  <div className={`absolute right-0 mt-1.5 w-52 border rounded-2xl shadow-2xl z-50 overflow-hidden animate-slide-up text-xs font-thai text-neutral-800 bg-admin-card border-neutral-100`}>
-                    <div className="p-2.5 border-b bg-neutral-50 font-bold text-neutral-400 text-[10px] uppercase">
-                      จำลองสแกน / สิทธิ์ระบบ
-                    </div>
-                    
-                    <button 
-                      onClick={() => switchRole('customer', 'day', 1)}
-                      className="w-full text-left px-3.5 py-2 hover:bg-amber-500/10 flex items-center justify-between border-b border-neutral-50"
-                    >
-                      <span className="font-semibold text-neutral-700">🍽️ ลูกค้ากลางวัน โต๊ะ 1</span>
-                      <span className="text-[9px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded-full font-bold">ตามสั่ง</span>
-                    </button>
-                    <button 
-                      onClick={() => switchRole('customer', 'day', 5)}
-                      className="w-full text-left px-3.5 py-2 hover:bg-amber-500/10 flex items-center justify-between border-b border-neutral-50"
-                    >
-                      <span className="font-semibold text-neutral-700">🍽️ ลูกค้ากลางวัน โต๊ะ 5</span>
-                      <span className="text-[9px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded-full font-bold">ตามสั่ง</span>
-                    </button>
-                    <button 
-                      onClick={() => switchRole('customer', 'night', 3)}
-                      className="w-full text-left px-3.5 py-2 hover:bg-orange-50 flex items-center justify-between border-b border-neutral-50"
-                    >
-                      <span className="font-semibold text-neutral-700">🥃 ลูกค้ากลางคืน โต๊ะ 3</span>
-                      <span className="text-[9px] bg-red-100 text-red-800 px-1.5 py-0.5 rounded-full font-bold">บาร์</span>
-                    </button>
-                    
-                    <button 
-                      onClick={() => {
-                        setShowRoleDropdown(false);
-                        if (activeStaffUser) {
-                          setRole('staff');
-                        } else {
-                          setShowLoginModal(true);
-                        }
-                      }}
-                      className="w-full text-left px-3.5 py-2 hover:bg-neutral-50 flex items-center gap-2 border-b border-neutral-50 text-neutral-700 font-semibold"
-                    >
-                      <ShieldCheck className="w-3.5 h-3.5 text-blue-500" />
-                      <span>แผงผู้ปฏิบัติงานพนักงาน</span>
-                    </button>
-                    
-                    <button 
-                      onClick={() => {
-                        setShowRoleDropdown(false);
-                        if (activeStaffUser) {
-                          setRole('owner');
-                        } else {
-                          setShowLoginModal(true);
-                        }
-                      }}
-                      className="w-full text-left px-3.5 py-2 hover:bg-neutral-50 flex items-center gap-2 text-neutral-700 font-semibold"
-                    >
-                      <Key className="w-3.5 h-3.5 text-purple-600" />
-                      <span>หลังบ้านบอร์ดบริหาร</span>
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
+                {role === 'customer' && <span>โต๊ะ {tableNo}</span>}
+                {role === 'staff' && (
+                  <>
+                    <ShieldCheck className="w-3.5 h-3.5 text-accent" />
+                    <span>พนักงาน{activeShop === 'night' ? 'กลางคืน' : 'กลางวัน'}</span>
+                  </>
+                )}
+                {role === 'owner' && (
+                  <>
+                    <Key className="w-3.5 h-3.5 text-accent" />
+                    <span>ผู้บริหาร</span>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </header>
 
         {/* MAIN BODY LAYOUT */}
-        <main className="flex-1 overflow-y-auto p-4 space-y-4">
+        <main className={`flex-1 overflow-y-auto ${role === 'login' ? 'flex flex-col' : 'p-4 space-y-4'}`}>
+          {/* The front door for staff/owner. Shown regardless of menu load state
+              — it doesn't need the menu, and the backend has to be up to log in
+              anyway (a failure surfaces inline on the form). */}
+          {role === 'login' && (
+            <LoginPage onLogin={handleLogin} settings={settings} />
+          )}
+
           {/* First-load states. Once state has arrived these never show again,
               so live SSE updates don't flash a spinner over the menu. */}
-          {loadState === 'loading' && (
+          {role !== 'login' && loadState === 'loading' && (
             <div className="py-16 text-center space-y-3 font-thai">
               <div className="w-8 h-8 mx-auto rounded-full border-2 border-[#A9713D]/25 border-t-[#A9713D] animate-spin" />
               <p className="text-xs text-neutral-400 font-medium">กำลังโหลดเมนูจาก Google Sheets...</p>
             </div>
           )}
 
-          {loadState === 'error' && (
+          {role !== 'login' && loadState === 'error' && (
             <div className="py-12 px-4 text-center space-y-3 font-thai">
               <span className="text-3xl">📡</span>
               <h3 className="font-kanit font-bold text-sm text-[#5A2E14]">โหลดข้อมูลไม่สำเร็จ</h3>
@@ -487,7 +495,7 @@ function App() {
             </div>
           )}
 
-          {loadState === 'ready' && menu.length === 0 && (
+          {role !== 'login' && loadState === 'ready' && menu.length === 0 && (
             <div className="py-16 text-center space-y-2 font-thai">
               <span className="text-3xl">🍽️</span>
               <h3 className="font-kanit font-bold text-sm text-[#5A2E14]">ยังไม่มีรายการอาหาร</h3>
@@ -548,7 +556,7 @@ function App() {
         </main>
 
         {/* LOGOUT ACTION FOR STAFF/OWNER */}
-        {role !== 'customer' && (
+        {(role === 'staff' || role === 'owner') && (
           <div className="p-3 border-t text-center flex justify-between items-center text-xs font-thai bg-strip border-line text-ink">
             <span className="font-semibold text-[11px]">
               ล็อกอินเป็น: <b className="text-amber-600">{activeStaffUser}</b>
@@ -568,73 +576,6 @@ function App() {
           ระบบร้านค้าอัจฉริยะ &bull; <button onClick={triggerPwa} className="underline hover:text-amber-500 font-bold focus:outline-none">ติดตั้งแอปรวม (PWA)</button>
         </footer>
       </div>
-
-      {/* LOGIN MODAL */}
-      {showLoginModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-fade">
-          <div className="bg-admin-card rounded-2xl max-w-sm w-full p-6 text-neutral-800 space-y-4 border border-neutral-100 shadow-2xl">
-            <div className="text-center">
-              <span className="w-12 h-12 bg-amber-500/10 text-amber-600 dark:text-amber-300 rounded-full flex items-center justify-center mx-auto mb-2 text-xl">👩‍🍳</span>
-              <h3 className="font-extrabold text-base font-kanit">เข้าสู่ระบบพนักงาน</h3>
-              <p className="text-xs text-neutral-400 font-thai">เพื่อเปิดบอร์ดรับออเดอร์ จัดการหลังบ้าน หรือตรวจสอบคลัง</p>
-            </div>
-            
-            <form onSubmit={handleLogin} className="space-y-3 font-thai text-xs">
-              <div>
-                <label className="block font-bold text-neutral-500 mb-1">ชื่อผู้ใช้งาน</label>
-                <input 
-                  type="text" 
-                  value={loginUser}
-                  onChange={e => setLoginUser(e.target.value)}
-                  className="w-full border rounded-xl p-3 bg-admin-field focus:ring-2 focus:ring-amber-500 focus:outline-none text-xs"
-                  placeholder="เช่น admin" 
-                  required
-                />
-              </div>
-              <div>
-                <label className="block font-bold text-neutral-500 mb-1">รหัสผ่าน</label>
-                <input 
-                  type="password" 
-                  value={loginPass}
-                  onChange={e => setLoginPass(e.target.value)}
-                  className="w-full border rounded-xl p-3 bg-admin-field focus:ring-2 focus:ring-amber-500 focus:outline-none text-xs"
-                  placeholder="รหัสผ่าน" 
-                  required
-                />
-              </div>
-              
-              <label className="flex items-center gap-2 cursor-pointer pt-1">
-                <input 
-                  type="checkbox" 
-                  checked={loginRemember}
-                  onChange={e => setLoginRemember(e.target.checked)}
-                  className="w-4 h-4 text-amber-600 focus:ring-amber-500 border-neutral-300 rounded" 
-                />
-                <span className="text-[11px] font-semibold text-neutral-600">จดจำรหัสผ่านบนเครื่องนี้</span>
-              </label>
-
-              <div className="flex gap-2 pt-3">
-                <button 
-                  type="button"
-                  onClick={() => setShowLoginModal(false)}
-                  className="flex-1 bg-neutral-100 hover:bg-neutral-200 font-bold py-3 rounded-xl transition text-neutral-700"
-                >
-                  ยกเลิก
-                </button>
-                <button 
-                  type="submit"
-                  className="flex-1 bg-amber-600 hover:bg-amber-700 font-bold py-3 rounded-xl transition text-white"
-                >
-                  ยืนยันเข้าสู่ระบบ
-                </button>
-              </div>
-            </form>
-            <div className="bg-amber-500/10 p-2.5 rounded-xl text-[10px] font-thai text-amber-800 dark:text-amber-200 leading-tight">
-              💡 บัญชีทดลอง: ผู้ใช้ <b className="font-bold">admin</b> / รหัสผ่าน <b className="font-bold">1234</b> (สามารถปรับปรุงได้ในหลังบ้านบอร์ดตั้งค่า)
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* PWA MOCKUP MODAL */}
       {showPwaModal && (

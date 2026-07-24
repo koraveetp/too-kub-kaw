@@ -54,6 +54,9 @@ function OwnerView({
   const [newStaffPosition, setNewStaffPosition] = useState('');
   const [newStaffWage, setNewStaffWage] = useState('');
   const [newStaffShop, setNewStaffShop] = useState('day');
+  // Access level: 'staff' (พนักงาน — shift board only) | 'owner' (เจ้าของ —
+  // this back office). Defaults to staff so owner access is always deliberate.
+  const [newStaffRole, setNewStaffRole] = useState('staff');
 
   // --- ประวัติเข้างาน (time clock history) ---
   // Which month the summary table shows (YYYY-MM) and which day the in/out
@@ -254,7 +257,9 @@ function OwnerView({
       // Daily wage in THB — numeric so payroll sums can be computed later.
       dailyWage: Math.max(0, parseFloat(newStaffWage) || 0),
       // Which shop this person works at: 'day' (ตู้กับข้าวบ้านยาย) | 'night' (เรือนเก่า)
-      shop: newStaffShop
+      shop: newStaffShop,
+      // Access level decides which panel their login lands on.
+      role: newStaffRole
     };
 
     setStaff(prev => [...prev, newAcc]);
@@ -264,6 +269,7 @@ function OwnerView({
     setNewStaffPosition('');
     setNewStaffWage('');
     setNewStaffShop('day');
+    setNewStaffRole('staff');
     showToast(`เพิ่มพนักงาน [${newAcc.name}] เข้าระบบแล้ว`);
   };
 
@@ -683,7 +689,7 @@ function OwnerView({
                   </div>
                 </div>
                 
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-2 gap-2 items-end">
                   <input
                     type="text"
                     value={newStaffPosition}
@@ -700,6 +706,18 @@ function OwnerView({
                     placeholder="ค่าแรง (บาท/วัน)"
                     className="border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono font-bold"
                   />
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-bold text-neutral-400 block mb-1">สิทธิ์การเข้าถึง</label>
+                  <select
+                    value={newStaffRole}
+                    onChange={e => setNewStaffRole(e.target.value)}
+                    className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold font-thai"
+                  >
+                    <option value="staff">พนักงาน (เห็นเฉพาะบอร์ดรับออเดอร์)</option>
+                    <option value="owner">เจ้าของ/ผู้บริหาร (เข้าหลังบ้านได้)</option>
+                  </select>
                 </div>
 
                 <input

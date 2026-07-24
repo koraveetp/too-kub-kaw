@@ -41,9 +41,14 @@ export async function login(user, pass) {
   return data;
 }
 
-// Fetch the full shared state once (used on first load).
+// Fetch the shared state once (used on first load). Sends the session token when
+// there is one, so an owner/staff receives the fields the server gates behind a
+// login (expenses / payroll / time clock / staff HR); a customer gets the public
+// slice.
 export async function fetchState() {
-  const res = await fetch('/api/state');
+  const headers = {};
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+  const res = await fetch('/api/state', { headers });
   if (!res.ok) throw new Error('Failed to load state from backend');
   return res.json();
 }
@@ -227,11 +232,14 @@ export function resolveImageUrl(image) {
   return src.startsWith('/') ? src : `/${src}`;
 }
 
-// Subscribe to live state pushes. `onState` is called with the full state
-// object on connect and again every time anything changes in any tab.
-// Returns an unsubscribe function.
+// Subscribe to live state pushes. `onState` is called with the state on connect
+// and again every time anything changes in any tab. The stream is scoped to the
+// current session: EventSource can't send an Authorization header, so the token
+// travels as a ?token= query param (matched by the backend). Returns an
+// unsubscribe function; re-call after login/logout so the stream re-scopes.
 export function subscribeToState(onState) {
-  const source = new EventSource('/api/events');
+  const url = authToken ? `/api/events?token=${encodeURIComponent(authToken)}` : '/api/events';
+  const source = new EventSource(url);
   source.addEventListener('state', (event) => {
     try {
       onState(JSON.parse(event.data));
