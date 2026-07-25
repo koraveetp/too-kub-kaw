@@ -114,12 +114,37 @@ export function createMenuItem(item) {
   });
 }
 
+// Read one dish back in its editable form ({ category, type, subcategory, name,
+// theme, imageUrl, price, variants }), to pre-fill the owner's edit form.
+export function fetchMenuItem(id) {
+  return authedJson(`/api/menu/items/${encodeURIComponent(id)}`);
+}
+
+// Overwrite an existing dish with a new spec (same shape as createMenuItem).
+export function updateMenuItem(id, item) {
+  return authedJson(`/api/menu/items/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(item),
+  });
+}
+
 // Put a dish on or off sale, by its stable dish id.
 export function setMenuAvailability(id, available) {
   return authedJson('/api/menu/items/availability', {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id, available }),
+  });
+}
+
+// Set which shift(s) a dish shows in: 'day' | 'night' | 'both' | 'none'.
+// 'none' hides it from every storefront (the owner's sun/moon pill sends this).
+export function setMenuTheme(id, theme) {
+  return authedJson('/api/menu/items/theme', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, theme }),
   });
 }
 

@@ -1,11 +1,13 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Plus, Trash2, Search, ImageUp, X, Loader2 } from 'lucide-react';
+import { Plus, Trash2, Search, ImageUp, X, Loader2, Pencil, Sun, Moon } from 'lucide-react';
 import {
   fetchMenuOptions,
   uploadMenuImage,
   createMenuItem,
+  fetchMenuItem,
+  updateMenuItem,
   createStockItem,
-  setMenuAvailability,
+  setMenuTheme,
   resolveImageUrl,
 } from '../api';
 import { shrinkImage } from '../image';
@@ -33,6 +35,22 @@ const FORM_THEMES = [
   { id: 'night', label: 'กลางคืน' },
   { id: 'both', label: 'ทั้งสอง' },
 ];
+
+// The list no longer splits by shift — every dish is shown together and each one
+// carries its own sun/moon pill. These two map between the single `theme` column
+// ('day' | 'night' | 'both' | 'none') and the pair of on/off shift toggles.
+function shiftsFromTheme(theme) {
+  return {
+    day: theme === 'day' || theme === 'both',
+    night: theme === 'night' || theme === 'both',
+  };
+}
+function themeFromShifts(day, night) {
+  if (day && night) return 'both';
+  if (day) return 'day';
+  if (night) return 'night';
+  return 'none'; // shown in no storefront
+}
 
 const EMPTY_FORM = {
   category: '',
@@ -103,7 +121,6 @@ function ComboBox({ label, value, options, onChange, placeholder, required }) {
 }
 
 function OwnerMenu({ menu, showToast }) {
-  const [theme, setTheme] = useState('day');
   const [search, setSearch] = useState('');
   const [heading, setHeading] = useState('all');
   // Dish ids with a toggle request in flight, so a double tap can't send two
@@ -115,6 +132,11 @@ function OwnerMenu({ menu, showToast }) {
   // Both use the exact same form; stock mode just reveals a quantity field and
   // writes an inventory row on submit.
   const [formMode, setFormMode] = useState('menu');
+  // The dish id currently being edited, or null when adding a new one. When set,
+  // the same form saves over an existing dish instead of creating one.
+  const [editingId, setEditingId] = useState(null);
+  // Dish whose editable copy is being fetched, so its pencil shows a spinner.
+  const [loadingEditId, setLoadingEditId] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [formTheme, setFormTheme] = useState('day');
   const [variants, setVariants] = useState([]);
@@ -139,49 +161,61 @@ function OwnerMenu({ menu, showToast }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showForm]);
 
-  const themeMenu = useMemo(
-    () => (menu || []).filter((m) => (m.theme || 'day') === theme || m.theme === 'both'),
-    [menu, theme]
-  );
+  // One combined list — day and night dishes together. Visibility per shift is
+  // controlled by each row's sun/moon pill, not by a page-level shift switch.
+  const allMenu = useMemo(() => menu || [], [menu]);
 
   const headings = useMemo(
-    () => [...new Set(themeMenu.map((m) => m.category).filter(Boolean))].sort(
+    () => [...new Set(allMenu.map((m) => m.category).filter(Boolean))].sort(
       (a, b) => a.localeCompare(b, 'th')
     ),
-    [themeMenu]
+    [allMenu]
   );
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return themeMenu.filter(
+    return allMenu.filter(
       (m) =>
         (heading === 'all' || m.category === heading) &&
         (!q || m.name.toLowerCase().includes(q))
     );
-  }, [themeMenu, heading, search]);
+  }, [allMenu, heading, search]);
 
-  const offCount = themeMenu.filter((m) => !m.available).length;
+  // "Hidden" = shown in no shift (theme 'none').
+  const hiddenCount = allMenu.filter((m) => (m.theme || 'day') === 'none').length;
 
-  // --- Availability ---------------------------------------------------------
-  const handleToggle = async (dish) => {
+  // --- Shift visibility (sun/moon pill) -------------------------------------
+  // Toggle one shift (day or night) for a dish. The other shift is left as-is,
+  // and the two booleans collapse back into the single `theme` value the backend
+  // stores. Turning both off hides the dish everywhere ('none').
+  const handleToggleShift = async (dish, which) => {
     if (pending.has(dish.id)) return;
+    const cur = shiftsFromTheme(dish.theme || 'day');
+    const next = { ...cur, [which]: !cur[which] };
+    const nextTheme = themeFromShifts(next.day, next.night);
+
     setPending((prev) => new Set(prev).add(dish.id));
     try {
-      await setMenuAvailability(dish.id, !dish.available);
-      // No local state update: the backend re-syncs from the database and
-      // pushes the new menu over SSE, which lands in every tab at once.
+      await setMenuTheme(dish.id, nextTheme);
+      // No local state update: the backend re-syncs from the database and pushes
+      // the new menu over SSE, which lands in every tab at once.
+      const where =
+        nextTheme === 'both' ? 'กลางวัน + กลางคืน'
+          : nextTheme === 'day' ? 'กลางวัน'
+            : nextTheme === 'night' ? 'กลางคืน'
+              : null;
       showToast(
-        dish.available
-          ? `ปิดขาย [${dish.name}] แล้ว`
-          : `เปิดขาย [${dish.name}] แล้ว`
+        where
+          ? `[${dish.name}] แสดงช่วง ${where}`
+          : `ซ่อน [${dish.name}] แล้ว (ไม่แสดงทั้งกลางวันและกลางคืน)`
       );
     } catch (err) {
-      showToast(`เปลี่ยนสถานะไม่สำเร็จ: ${err.message}`);
+      showToast(`เปลี่ยนไม่สำเร็จ: ${err.message}`);
     } finally {
       setPending((prev) => {
-        const next = new Set(prev);
-        next.delete(dish.id);
-        return next;
+        const n = new Set(prev);
+        n.delete(dish.id);
+        return n;
       });
     }
   };
@@ -191,7 +225,40 @@ function OwnerMenu({ menu, showToast }) {
     setForm(EMPTY_FORM);
     setVariants([]);
     setImagePreview('');
+    setEditingId(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  // Open the form pre-filled with an existing dish. The editable copy — which
+  // includes หมวดหมู่/ประเภท the app-facing menu drops — is fetched from the
+  // backend rather than read off the menu prop, so what is saved back is exactly
+  // what is in the database.
+  const startEdit = async (dish) => {
+    if (loadingEditId) return;
+    setLoadingEditId(dish.id);
+    try {
+      const spec = await fetchMenuItem(dish.id);
+      setForm({
+        category: spec.category || '',
+        type: spec.type || 'เมนูหลัก',
+        subcategory: spec.subcategory || '',
+        name: spec.name || '',
+        price: spec.price != null ? String(spec.price) : '',
+        quantity: '',
+        imageUrl: spec.imageUrl || '',
+      });
+      setVariants((spec.variants || []).map((v) => ({ meat: v.meat, price: String(v.price) })));
+      setFormTheme(spec.theme || 'day');
+      setImagePreview('');
+      setEditingId(dish.id);
+      setFormMode('menu');
+      setShowForm(true);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    } catch (err) {
+      showToast(`โหลดเมนูไม่สำเร็จ: ${err.message}`);
+    } finally {
+      setLoadingEditId(null);
+    }
   };
 
   const handlePickImage = async (e) => {
@@ -252,44 +319,50 @@ function OwnerMenu({ menu, showToast }) {
     }
 
     setSaving(true);
+    const payload = {
+      category: form.category.trim(),
+      type: form.type.trim() || 'เมนูหลัก',
+      subcategory: form.subcategory.trim(),
+      name: form.name.trim(),
+      theme: formTheme,
+      imageUrl: form.imageUrl,
+      variants: filled.length
+        ? filled.map((v) => ({ meat: v.meat.trim(), price: Number(v.price) }))
+        : [{ meat: '-', price: Number(form.price) }],
+    };
     try {
-      await createMenuItem({
-        category: form.category.trim(),
-        type: form.type.trim() || 'เมนูหลัก',
-        subcategory: form.subcategory.trim(),
-        name: form.name.trim(),
-        theme: formTheme,
-        imageUrl: form.imageUrl,
-        variants: filled.length
-          ? filled.map((v) => ({ meat: v.meat.trim(), price: Number(v.price) }))
-          : [{ meat: '-', price: Number(form.price) }],
-      });
+      if (editingId) {
+        // Editing an existing dish: overwrite its rows. No stock side-effect —
+        // that only makes sense when a dish is first created.
+        await updateMenuItem(editingId, payload);
+        showToast(`แก้ไขเมนู [${form.name.trim()}] เรียบร้อย`);
+      } else {
+        await createMenuItem(payload);
 
-      // In stock mode, file the same item in คลังวัตถุดิบ. Keep the menu success
-      // even if the stock write fails — just tell the owner about it.
-      let stockMsg = ' เรียบร้อย';
-      if (formMode === 'stock') {
-        try {
-          const item = await createStockItem({
-            category: form.category.trim(),
-            name: form.name.trim(),
-            quantity,
-            imageUrl: form.imageUrl,
-          });
-          stockMsg = ` และบันทึกลงคลังแล้ว (คงเหลือ ${item.quantity})`;
-        } catch (stockErr) {
-          stockMsg = ` แต่บันทึกลงคลังไม่สำเร็จ: ${stockErr.message}`;
+        // In stock mode, file the same item in คลังวัตถุดิบ. Keep the menu success
+        // even if the stock write fails — just tell the owner about it.
+        let stockMsg = ' เรียบร้อย';
+        if (formMode === 'stock') {
+          try {
+            const item = await createStockItem({
+              category: form.category.trim(),
+              name: form.name.trim(),
+              quantity,
+              imageUrl: form.imageUrl,
+            });
+            stockMsg = ` และบันทึกลงคลังแล้ว (คงเหลือ ${item.quantity})`;
+          } catch (stockErr) {
+            stockMsg = ` แต่บันทึกลงคลังไม่สำเร็จ: ${stockErr.message}`;
+          }
         }
+        showToast(`เพิ่มเมนู [${form.name.trim()}]${stockMsg}`);
       }
 
-      showToast(`เพิ่มเมนู [${form.name.trim()}]${stockMsg}`);
       resetForm();
       setShowForm(false);
-      // Show the shift the dish was filed under, so it is on screen.
-      setTheme(formTheme);
       setHeading('all');
     } catch (err) {
-      showToast(`เพิ่มเมนูไม่สำเร็จ: ${err.message}`);
+      showToast(`${editingId ? 'แก้ไข' : 'เพิ่ม'}เมนูไม่สำเร็จ: ${err.message}`);
     } finally {
       setSaving(false);
     }
@@ -298,44 +371,39 @@ function OwnerMenu({ menu, showToast }) {
   return (
     <div className="space-y-4">
 
-      {/* SHIFT SWITCH */}
-      <div className="flex gap-1.5 bg-neutral-100 rounded-xl p-1 text-[11px] font-bold">
-        {THEMES.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => { setTheme(t.id); setHeading('all'); }}
-            className={`flex-1 py-2 rounded-lg transition ${t.id === theme ? 'bg-admin-field text-neutral-800 shadow-xs' : 'text-neutral-500 hover:text-neutral-700'}`}
-          >
-            {t.label}
-          </button>
-        ))}
+      {/* ADD BUTTONS */}
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          onClick={() => { resetForm(); setShowForm(true); setFormMode('menu'); setFormTheme('day'); }}
+          className="bg-admin-cta hover:bg-admin-cta-hover text-admin-cta-ink font-bold py-3 rounded-2xl transition font-kanit flex items-center justify-center gap-2 text-xs"
+        >
+          <Plus className="w-4 h-4" />
+          เพิ่มเมนูใหม่
+        </button>
+        <button
+          onClick={() => { resetForm(); setShowForm(true); setFormMode('stock'); setFormTheme('day'); }}
+          className="bg-ctl hover:bg-ctl-hover text-ctl-ink font-bold py-3 rounded-2xl transition font-kanit flex items-center justify-center gap-2 text-xs"
+        >
+          <Plus className="w-4 h-4" />
+          อัพเดทสตอก
+        </button>
       </div>
 
-      {/* ADD BUTTONS / FORM */}
-      {!showForm ? (
-        <div className="grid grid-cols-2 gap-2">
-          <button
-            onClick={() => { setShowForm(true); setFormMode('menu'); setFormTheme(theme); }}
-            className="bg-admin-cta hover:bg-admin-cta-hover text-admin-cta-ink font-bold py-3 rounded-2xl transition font-kanit flex items-center justify-center gap-2 text-xs"
-          >
-            <Plus className="w-4 h-4" />
-            เพิ่มเมนูใหม่
-          </button>
-          <button
-            onClick={() => { setShowForm(true); setFormMode('stock'); setFormTheme(theme); }}
-            className="bg-ctl hover:bg-ctl-hover text-ctl-ink font-bold py-3 rounded-2xl transition font-kanit flex items-center justify-center gap-2 text-xs"
-          >
-            <Plus className="w-4 h-4" />
-            อัพเดทสตอก
-          </button>
-        </div>
-      ) : (
-        <form
-          onSubmit={handleSubmit}
-          className="bg-admin-panel border border-line rounded-2xl p-4 space-y-3 text-xs font-thai"
+      {/* FORM — as a pop-up, so editing a dish deep in the list no longer jumps
+          the whole page to the top. Bottom-sheet on phones, centred card on
+          wider screens. Tapping the dim backdrop closes it. */}
+      {showForm && (
+        <div
+          className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4"
+          onClick={() => { setShowForm(false); resetForm(); }}
         >
+          <form
+            onSubmit={handleSubmit}
+            onClick={(e) => e.stopPropagation()}
+            className="bg-admin-panel w-full max-w-md rounded-t-3xl sm:rounded-3xl p-4 space-y-3 text-xs font-thai max-h-[90vh] overflow-y-auto shadow-2xl"
+          >
           <div className="flex justify-between items-baseline">
-            <h3 className="font-extrabold text-base font-kanit text-neutral-800">{formMode === 'stock' ? 'อัพเดทสตอก' : 'เพิ่มเมนูใหม่'}</h3>
+            <h3 className="font-extrabold text-base font-kanit text-neutral-800">{editingId ? 'แก้ไขเมนู' : formMode === 'stock' ? 'อัพเดทสตอก' : 'เพิ่มเมนูใหม่'}</h3>
             <button
               type="button"
               onClick={() => { setShowForm(false); resetForm(); }}
@@ -507,20 +575,24 @@ function OwnerMenu({ menu, showToast }) {
                     {form.imageUrl}
                   </span>
                 </div>
-                <div className="flex flex-col gap-1">
+                <div className="flex items-center gap-1 flex-shrink-0">
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
-                    className="text-[10px] font-bold text-amber-700 hover:text-amber-900"
+                    aria-label="เปลี่ยนรูป"
+                    title="เปลี่ยนรูป"
+                    className="p-2 rounded-lg text-amber-700 hover:bg-amber-500/10 transition"
                   >
-                    เปลี่ยนรูป
+                    <Pencil className="w-4 h-4" />
                   </button>
                   <button
                     type="button"
                     onClick={handleClearImage}
-                    className="text-[10px] font-bold text-red-500 hover:text-red-700"
+                    aria-label="ลบรูป"
+                    title="ลบรูป"
+                    className="p-2 rounded-lg text-red-500 hover:bg-red-500/10 transition"
                   >
-                    ลบรูป
+                    <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
               </div>
@@ -555,9 +627,10 @@ function OwnerMenu({ menu, showToast }) {
             className="w-full bg-admin-cta hover:bg-admin-cta-hover text-admin-cta-ink font-bold py-3 rounded-2xl transition font-kanit disabled:opacity-50 flex items-center justify-center gap-2"
           >
             {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-            {saving ? 'กำลังบันทึก…' : (formMode === 'stock' ? 'บันทึกเมนู + คลัง' : 'บันทึกเมนูใหม่')}
+            {saving ? 'กำลังบันทึก…' : editingId ? 'บันทึกการแก้ไข' : (formMode === 'stock' ? 'บันทึกเมนู + คลัง' : 'บันทึกเมนูใหม่')}
           </button>
-        </form>
+          </form>
+        </div>
       )}
 
       {/* FILTERS */}
@@ -589,15 +662,16 @@ function OwnerMenu({ menu, showToast }) {
       {/* LIST */}
       <div className="flex justify-between items-center pl-1 text-[10px] font-bold text-neutral-400">
         <span>{visible.length} รายการ</span>
-        {offCount > 0 && <span className="text-red-500">ปิดขายอยู่ {offCount} รายการ</span>}
+        {hiddenCount > 0 && <span className="text-red-500">ซ่อนอยู่ {hiddenCount} รายการ</span>}
       </div>
 
       <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs divide-y divide-neutral-100">
         {visible.length > 0 ? (
           visible.map((dish) => {
             const busy = pending.has(dish.id);
+            const shifts = shiftsFromTheme(dish.theme || 'day');
             return (
-              <div key={dish.id} className="flex items-center gap-3 px-3 py-2.5 font-thai">
+              <div key={dish.id} className="flex items-center gap-2.5 px-3 py-2.5 font-thai">
                 <div className="w-11 h-11 rounded-xl bg-neutral-100 flex items-center justify-center text-xl overflow-hidden flex-shrink-0">
                   {dish.image
                     ? <img src={resolveImageUrl(dish.image)} alt="" loading="lazy" className="w-full h-full object-cover" />
@@ -605,7 +679,9 @@ function OwnerMenu({ menu, showToast }) {
                 </div>
 
                 <div className="flex-1 min-w-0">
-                  <span className={`block font-bold text-xs truncate ${dish.available ? 'text-neutral-800' : 'text-neutral-400 line-through'}`}>
+                  {/* Name always shown normally — the empty sun/moon pill is the
+                      only "hidden" cue, matching the design mock. */}
+                  <span className="block font-bold text-xs truncate text-neutral-800">
                     {dish.name}
                   </span>
                   <span className="block text-[10px] text-neutral-400 font-medium truncate">
@@ -616,21 +692,42 @@ function OwnerMenu({ menu, showToast }) {
                   </span>
                 </div>
 
-                {/* TOGGLE SWITCH */}
-                <button
-                  onClick={() => handleToggle(dish)}
-                  disabled={busy}
-                  role="switch"
-                  aria-checked={dish.available}
-                  aria-label={`${dish.available ? 'ปิด' : 'เปิด'}ขาย ${dish.name}`}
-                  title={dish.available ? 'กดเพื่อปิดขาย' : 'กดเพื่อเปิดขาย'}
-                  className={`relative w-11 h-6 rounded-full flex-shrink-0 transition disabled:opacity-50 ${dish.available ? 'bg-emerald-500' : 'bg-neutral-300'}`}
-                >
-                  <span
-                    className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all flex items-center justify-center ${dish.available ? 'left-[22px]' : 'left-0.5'}`}
+                {/* SHIFT PILL — sun = show by day, moon = show by night. Neither lit
+                    = hidden everywhere. Each segment toggles independently. */}
+                <div className={`inline-flex rounded-full border-2 border-wood-dark overflow-hidden flex-shrink-0 ${busy ? 'opacity-50' : ''}`}>
+                  <button
+                    onClick={() => handleToggleShift(dish, 'day')}
+                    disabled={busy}
+                    aria-pressed={shifts.day}
+                    aria-label={`${shifts.day ? 'ปิด' : 'เปิด'}การแสดงตอนกลางวัน ${dish.name}`}
+                    title={shifts.day ? 'แสดงตอนกลางวัน (กดเพื่อปิด)' : 'ไม่แสดงตอนกลางวัน (กดเพื่อเปิด)'}
+                    className={`px-3 py-1.5 transition ${shifts.day ? 'bg-wood text-white' : 'text-wood-dark hover:bg-wood/10'}`}
                   >
-                    {busy && <Loader2 className="w-3 h-3 animate-spin text-neutral-400" />}
-                  </span>
+                    <Sun className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => handleToggleShift(dish, 'night')}
+                    disabled={busy}
+                    aria-pressed={shifts.night}
+                    aria-label={`${shifts.night ? 'ปิด' : 'เปิด'}การแสดงตอนกลางคืน ${dish.name}`}
+                    title={shifts.night ? 'แสดงตอนกลางคืน (กดเพื่อปิด)' : 'ไม่แสดงตอนกลางคืน (กดเพื่อเปิด)'}
+                    className={`px-3 py-1.5 border-l-2 border-wood-dark transition ${shifts.night ? 'bg-wood text-white' : 'text-wood-dark hover:bg-wood/10'}`}
+                  >
+                    <Moon className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* EDIT (pencil) */}
+                <button
+                  onClick={() => startEdit(dish)}
+                  disabled={loadingEditId === dish.id}
+                  aria-label={`แก้ไข ${dish.name}`}
+                  title="แก้ไขเมนู (ชื่อ ราคา ฯลฯ)"
+                  className="w-9 h-9 rounded-full border-2 border-wood-dark flex items-center justify-center text-wood-dark hover:bg-wood/10 transition disabled:opacity-50 flex-shrink-0"
+                >
+                  {loadingEditId === dish.id
+                    ? <Loader2 className="w-4 h-4 animate-spin" />
+                    : <Pencil className="w-4 h-4" />}
                 </button>
               </div>
             );

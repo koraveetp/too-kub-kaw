@@ -39,7 +39,10 @@ import {
   fetchMenuFromDb,
   fetchMenuOptions,
   setDishAvailability,
+  setDishTheme,
   insertMenuItem,
+  getDishForEdit,
+  updateMenuItem,
   dishIdentityTaken,
   hasAvailableColumn,
 } from './menu-db.js';
@@ -300,7 +303,14 @@ async function syncMenuFromDb() {
   // survives untouched; once night rows exist, the database takes over and the
   // seeded copy is dropped rather than duplicated alongside it.
   const dbThemes = new Set(dbMenu.map((item) => item.theme));
-  const manualItems = (state.menu || []).filter((m) => !dbThemes.has(m.theme));
+  // Keep only the hand-seeded shift menus the database genuinely doesn't supply.
+  // 'none' (hidden-everywhere) is a DATABASE-owned state, never a seeded theme:
+  // a dish set to 'none' then re-enabled leaves a stale 'none' copy in state.menu
+  // whose theme is never in dbThemes, so without this guard the merge would keep
+  // it forever as an undeletable ghost that isn't in the database. Drop those.
+  const manualItems = (state.menu || []).filter(
+    (m) => m.theme !== 'none' && !dbThemes.has(m.theme)
+  );
   const nextMenu = [
     ...dbMenu.map((item) =>
       prevAvailById.has(item.id)
@@ -851,7 +861,7 @@ function parseMenuItemBody(body) {
   const subcategory = str(body?.subcategory);
   const name = str(body?.name);
   const rawTheme = str(body?.theme);
-  const theme = ['day', 'night', 'both'].includes(rawTheme) ? rawTheme : 'day';
+  const theme = ['day', 'night', 'both', 'none'].includes(rawTheme) ? rawTheme : 'day';
   const imageUrl = str(body?.imageUrl);
 
   if (!name) return { error: 'กรุณากรอกชื่อรายการ' };
@@ -911,6 +921,42 @@ app.post('/api/menu/items', requireAuth, async (req, res) => {
   }
 });
 
+// Read one dish back in its editable form (category/type/subcategory + variants),
+// so the owner's edit screen can pre-fill the same form the create screen uses.
+app.get('/api/menu/items/:id', requireAuth, async (req, res) => {
+  try {
+    const dish = await getDishForEdit(String(req.params.id));
+    if (!dish) return res.status(404).json({ error: 'ไม่พบเมนูนี้ในฐานข้อมูล' });
+    res.json(dish);
+  } catch (err) {
+    console.error('[backend] Could not load menu item:', err.message);
+    res.status(502).json({ error: err.message || 'โหลดเมนูไม่สำเร็จ' });
+  }
+});
+
+// Edit an existing dish. Reuses the same validation as adding one, then replaces
+// the dish's rows (see updateMenuItem) and broadcasts the refreshed menu.
+app.put('/api/menu/items/:id', requireAuth, async (req, res) => {
+  const { value, error } = parseMenuItemBody(req.body);
+  if (error) return res.status(400).json({ error });
+  const id = String(req.params.id);
+
+  try {
+    // Ignore the dish's own rows so renaming nothing isn't read as a collision.
+    if (await dishIdentityTaken(value, id)) {
+      return res.status(409).json({ error: 'มีเมนูชื่อนี้อยู่แล้วในหัวข้อและกะเดียวกัน' });
+    }
+    const updated = await updateMenuItem(id, value);
+    if (!updated) return res.status(404).json({ error: 'ไม่พบเมนูนี้ในฐานข้อมูล' });
+    const count = await refreshMenuAndBroadcast();
+    console.log(`[backend] Updated menu item "${value.name}" (${updated} row(s)); menu now ${count} items`);
+    res.json({ ok: true, rows: updated });
+  } catch (err) {
+    console.error('[backend] Could not update menu item:', err.message);
+    res.status(502).json({ error: err.message || 'แก้ไขเมนูไม่สำเร็จ' });
+  }
+});
+
 // Put a dish on or off sale. Keyed by the dish id the app already renders —
 // see setDishAvailability() for why matching on name would be unreliable.
 app.patch('/api/menu/items/availability', requireAuth, async (req, res) => {
@@ -929,6 +975,28 @@ app.patch('/api/menu/items/availability', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[backend] Could not change availability:', err.message);
     res.status(502).json({ error: err.message || 'เปลี่ยนสถานะไม่สำเร็จ' });
+  }
+});
+
+// Set which shift(s) a dish shows in — day / night / both / none. Drives the
+// sun/moon pill in จัดการเมนู: 'none' hides the dish from every storefront
+// without deleting it. See setDishTheme() for why it also clears ปิดขาย.
+app.patch('/api/menu/items/theme', requireAuth, async (req, res) => {
+  const id = String(req.body?.id || '').trim();
+  const theme = String(req.body?.theme || '').trim();
+  if (!id) return res.status(400).json({ error: 'ต้องระบุรหัสเมนู' });
+  if (!['day', 'night', 'both', 'none'].includes(theme)) {
+    return res.status(400).json({ error: "ค่า theme ต้องเป็น day, night, both หรือ none" });
+  }
+
+  try {
+    const updated = await setDishTheme(id, theme);
+    if (!updated) return res.status(404).json({ error: 'ไม่พบเมนูนี้ในฐานข้อมูล' });
+    await refreshMenuAndBroadcast();
+    res.json({ ok: true, rows: updated });
+  } catch (err) {
+    console.error('[backend] Could not change theme:', err.message);
+    res.status(502).json({ error: err.message || 'เปลี่ยนกะที่แสดงไม่สำเร็จ' });
   }
 });
 

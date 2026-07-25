@@ -1,14 +1,25 @@
 import React, { useState, useMemo, useRef } from 'react';
-import { TrendingUp, TrendingDown, Wallet, Coins } from 'lucide-react';
+import { TrendingUp, TrendingDown, Wallet, Coins, Banknote, Landmark, Smartphone } from 'lucide-react';
 import { todayKey, formatThaiDate, THAI_MONTHS_FULL } from '../expenses';
 import {
   dayTotals,
+  dayTakingsByMethod,
   dailySeries,
   monthlySeries,
   menuStats,
   percentChange,
-  yesterdayKey
+  yesterdayKey,
+  summaryRows,
+  summaryTotals,
+  availableMonths
 } from '../stats';
+
+// 'YYYY-MM' -> 'กรกฎาคม 2569'
+function monthLabel(key) {
+  const [y, m] = (key || '').split('-').map(Number);
+  if (!y || !m) return key || '';
+  return `${THAI_MONTHS_FULL[m - 1]} ${y + 543}`;
+}
 
 // Categorical slots 1 and 2 of the validated palette. Sales and profit are both
 // in baht, so they share ONE y-axis — never a second scale.
@@ -90,6 +101,26 @@ function StatTile({ label, value, delta, tone, Icon }) {
           ไม่มีข้อมูลเมื่อวาน
         </span>
       )}
+    </div>
+  );
+}
+
+// One takings tile: where today's money physically landed (till / bank / wallet).
+// Simpler than StatTile — no day-over-day delta, since "which pocket" is a
+// snapshot, not a trend.
+function TakingsTile({ label, value, tone, Icon }) {
+  return (
+    <div className="bg-admin-card border rounded-2xl p-3.5 shadow-xs">
+      <span className={`inline-flex items-center gap-1 text-[10px] font-extrabold font-kanit px-2 py-1 rounded-lg ${tone}`}>
+        <Icon className="w-3 h-3" />
+        {label}
+      </span>
+      <div className="flex items-baseline gap-1 mt-2">
+        <span className="font-mono text-lg font-extrabold text-neutral-800 leading-none">
+          {baht(value)}
+        </span>
+        <span className="text-[10px] text-neutral-400 font-medium">บาท</span>
+      </div>
     </div>
   );
 }
@@ -233,6 +264,13 @@ function OwnerDashboard({ orders, expenses, menu }) {
     [orders, expenses, shift]
   );
 
+  // Where today's takings landed: cash in the till, PromptPay to the shop bank,
+  // or คนละครึ่ง into the เป๋าตัง wallet.
+  const takings = useMemo(
+    () => dayTakingsByMethod(orders, shift, today),
+    [orders, shift, today]
+  );
+
   const points = useMemo(() => {
     if (range === 'week') return dailySeries(orders, expenses, shift, 7);
     if (range === 'month') return dailySeries(orders, expenses, shift, 30);
@@ -243,6 +281,27 @@ function OwnerDashboard({ orders, expenses, menu }) {
     () => menuStats(orders, menu, shift, group, sortBy),
     [orders, menu, shift, group, sortBy]
   );
+
+  // Month summary, split day vs night with a combined total — moved here from
+  // the สรุปยอด tab so it sits directly under today's income/expense cards.
+  // Always shows both shifts (that's the whole point of the table), so it ignores
+  // the shift selector above; the month is chosen with its own dropdown.
+  const summaryMonths = useMemo(() => availableMonths(orders, expenses), [orders, expenses]);
+  const [summaryMonth, setSummaryMonth] = useState(() => today.slice(0, 7));
+  // If the picked month scrolls out of the available list (e.g. data cleared),
+  // fall back to the newest month so the table never renders a stale/empty key.
+  const monthKey = summaryMonths.includes(summaryMonth)
+    ? summaryMonth
+    : (summaryMonths[0] || today.slice(0, 7));
+  const monthRows = useMemo(
+    () => summaryRows(orders, expenses, monthKey),
+    [orders, expenses, monthKey]
+  );
+  const monthTotals = useMemo(() => summaryTotals(monthRows), [monthRows]);
+  const monthByShift = useMemo(() => {
+    const make = (id) => summaryTotals(monthRows.filter((r) => r.shop === id));
+    return { day: make('day'), night: make('night') };
+  }, [monthRows]);
 
   return (
     <div className="space-y-4">
@@ -283,6 +342,76 @@ function OwnerDashboard({ orders, expenses, menu }) {
           tone="bg-blue-100 text-blue-800"
           Icon={Coins}
         />
+      </div>
+
+      {/* TAKINGS BY MONEY TYPE — where today's money physically landed */}
+      <div className="grid grid-cols-3 gap-2">
+        <TakingsTile
+          label="เงินสด"
+          value={takings.cash}
+          tone="bg-emerald-100 text-emerald-800"
+          Icon={Banknote}
+        />
+        <TakingsTile
+          label="บัญชีร้าน"
+          value={takings.qr}
+          tone="bg-indigo-100 text-indigo-800"
+          Icon={Landmark}
+        />
+        <TakingsTile
+          label="เป๋าตัง"
+          value={takings.split}
+          tone="bg-rose-100 text-rose-800"
+          Icon={Smartphone}
+        />
+      </div>
+
+      {/* MONTH SUMMARY — day vs night side by side for the chosen month, with a
+          combined row underneath. Moved here from the สรุปยอด tab so it reads
+          right below today's cards; the month is picked with the dropdown. */}
+      <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs">
+        <div className="flex items-center justify-between gap-2 px-3 py-2 bg-neutral-50 border-b">
+          <span className="text-[11px] font-extrabold text-neutral-700 font-kanit">สรุปยอดรายเดือน</span>
+          {summaryMonths.length > 0 ? (
+            <select
+              value={monthKey}
+              onChange={(e) => setSummaryMonth(e.target.value)}
+              className="text-[10px] font-bold text-neutral-600 bg-admin-field border rounded-lg py-1 pl-2 pr-1 focus:outline-none focus:ring-1 focus:ring-amber-500"
+            >
+              {summaryMonths.map((m) => (
+                <option key={m} value={m}>{monthLabel(m)}</option>
+              ))}
+            </select>
+          ) : (
+            <span className="text-[10px] font-bold text-neutral-500">{monthLabel(monthKey)}</span>
+          )}
+        </div>
+        <div className="grid grid-cols-[1.1fr_1fr_1fr_1fr] gap-1.5 px-3 py-2 bg-neutral-50 border-b text-[9.5px] font-extrabold text-neutral-500 font-kanit">
+          <span>กะ</span>
+          <span className="text-right">รายรับ</span>
+          <span className="text-right">รายจ่าย</span>
+          <span className="text-right">กำไรสุทธิ</span>
+        </div>
+        {[
+          { label: 'กลางวัน', t: monthByShift.day },
+          { label: 'กลางคืน', t: monthByShift.night }
+        ].map(({ label, t }) => (
+          <div
+            key={label}
+            className="grid grid-cols-[1.1fr_1fr_1fr_1fr] gap-1.5 px-3 py-2.5 border-b border-neutral-100 text-[11px] items-center font-thai"
+          >
+            <span className="font-bold text-neutral-800">{label}</span>
+            <span className="text-right font-mono font-bold text-admin-income">{baht(t.income)}</span>
+            <span className="text-right font-mono font-bold text-admin-expense">{baht(t.expense)}</span>
+            <span className="text-right font-mono font-extrabold text-neutral-800">{baht(t.profit)}</span>
+          </div>
+        ))}
+        <div className="grid grid-cols-[1.1fr_1fr_1fr_1fr] gap-1.5 px-3 py-2.5 bg-neutral-50 text-[11px] items-center font-thai">
+          <span className="font-extrabold text-neutral-800 font-kanit">รวมทั้งเดือน</span>
+          <span className="text-right font-mono font-extrabold text-admin-income">{baht(monthTotals.income)}</span>
+          <span className="text-right font-mono font-extrabold text-admin-expense">{baht(monthTotals.expense)}</span>
+          <span className="text-right font-mono font-extrabold text-neutral-800">{baht(monthTotals.profit)}</span>
+        </div>
       </div>
 
       {/* TREND CHART */}

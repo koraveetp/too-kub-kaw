@@ -57,6 +57,8 @@ function CustomerView({
   const [selectedChoices, setSelectedChoices] = useState({});
   const [showCartModal, setShowCartModal] = useState(false);
   const [showSuccessNotice, setShowSuccessNotice] = useState(false);
+  // เช็กบิลด้วยตัวเอง — when open, the diner picks ปกติ vs คนละครึ่ง.
+  const [showCheckoutModal, setShowCheckoutModal] = useState(false);
 
   const isDay = theme === 'day';
   const isEn = lang === 'en';
@@ -102,7 +104,7 @@ function CustomerView({
   const isAvailable = (dish) => dish.available && !soldOutNames.has(normName(dish.name));
 
   // Filter menu items for current theme
-  const filteredMenu = menu.filter(item => item.theme === theme || item.theme === 'both');
+const filteredMenu = menu.filter(item => item.theme === theme || item.theme === 'both');
 
   const itemsToShow = filteredMenu.filter(item =>
     activeGroup === 'drink' ? isDrinkItem(item) : !isDrinkItem(item)
@@ -128,6 +130,7 @@ function CustomerView({
   const cartTotal = cart.reduce((sum, item) => sum + (item.price + item.addonCost) * item.qty, 0);
 
   const handleOpenDetail = (item) => {
+    if (isSettling) return; // ordering is locked while the table checks out
     if (!isAvailable(item)) return;
     setSelectedItem(item);
     // Default to the first protein option (if the dish has any).
@@ -176,6 +179,7 @@ function CustomerView({
     const cartItem = {
       id: selectedItem.id + '_' + Date.now().toString(36),
       menuId: selectedItem.id,
+      group: selectedItem.group || 'food',
       name: itemName,
       nameEn: itemNameEn,
       option: selectedOption ? selectedOption.name : null,
@@ -210,6 +214,10 @@ function CustomerView({
 
   const handlePlaceOrder = () => {
     if (cart.length === 0) return;
+    if (isSettling) {
+      showToast(t('กำลังเช็กบิล หากต้องการสั่งเพิ่มกรุณาแจ้งพนักงาน', 'Checking out — please ask staff to order more'));
+      return;
+    }
 
     // REALTIME stock validation
     let stockError = false;
@@ -251,6 +259,8 @@ function CustomerView({
         // English mirrors of name/add-ons ride along so the diner's own bill can
         // read in their language; staff keep seeing the Thai `name`/`addOns`.
         nameEn: item.nameEn,
+        menuId: item.menuId,
+        group: item.group || 'food',
         qty: item.qty,
         price: item.basePrice,
         addonCost: item.addonCost,
@@ -288,8 +298,47 @@ function CustomerView({
     )
     .sort((a, b) => b.createdAt - a.createdAt);
 
+  // Once the table has asked to เช็กบิล (or staff have printed it), ordering is
+  // locked so the printed total can't drift from the system. The bill carrying
+  // the checkout marks the whole table as "settling".
+  const checkoutBill = tableOrders.find(o => o.checkout);
+  const isSettling = !!checkoutBill;
+  const checkoutType = checkoutBill?.checkout?.type || 'normal';
+  const grandTotal = tableOrders.reduce((sum, o) => sum + (o.total || 0), 0);
+
+  // Tap เช็กบิล → stamp every open bill on this table with the chosen checkout
+  // type. This both locks ordering here and pops "โต๊ะ X ขอเช็กบิล" on staff.
+  const handleRequestCheckout = (type) => {
+    setOrders(prev => prev.map(o =>
+      String(o.table) === String(tableNo) && o.status !== 'paid' && o.status !== 'cancelled'
+        ? { ...o, checkout: { stage: 'requested', type, requestedAt: Date.now() } }
+        : o
+    ));
+    setShowCheckoutModal(false);
+    setShowCartModal(false);
+    setShowStatusList(true);
+    showToast(t('แจ้งเช็กบิลให้พนักงานแล้ว', 'Staff have been notified for checkout'));
+  };
+
   return (
     <div className="space-y-4 font-thai text-sm">
+
+      {/* ORDER-LOCK BANNER — shown in BOTH the menu and status views while the
+          table is checking out, so a diner can't quietly keep ordering. */}
+      {isSettling && (
+        <div className="rounded-2xl p-3.5 flex items-start gap-3 bg-amber-50 border border-amber-300 text-amber-900">
+          <span className="text-xl flex-shrink-0">🧾</span>
+          <div className="space-y-0.5">
+            <p className="font-kanit font-bold text-sm">
+              {t('กำลังอยู่ในขั้นตอนเช็กบิล', 'Checkout in progress')}
+              {checkoutType === 'split' && <span className="ml-1">· {t('คนละครึ่ง', 'Half-Half')}</span>}
+            </p>
+            <p className="text-[12px] leading-snug font-medium">
+              {t('หากต้องการสั่งเพิ่มกรุณาแจ้งพนักงาน', 'To order more, please ask our staff.')}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* SUCCESS NOTICE ANIMATED BOUNCE */}
       {showSuccessNotice && (
@@ -383,6 +432,37 @@ function CustomerView({
               </div>
             )}
           </div>
+
+          {/* CHECK-OUT FOOTER — grand total + เช็กบิล, or the locked status. */}
+          {tableOrders.length > 0 && (
+            isSettling ? (
+              <div className="rounded-2xl p-4 space-y-1.5 bg-card border border-line text-center">
+                <p className="text-[11px] font-bold text-ink-2">
+                  {t('ยอดที่ต้องชำระ', 'Amount due')} · {t(
+                    checkoutType === 'split' ? 'คนละครึ่ง' : 'ปกติ',
+                    checkoutType === 'split' ? 'Half-Half' : 'Standard'
+                  )}
+                </p>
+                <p className="font-mono font-extrabold text-2xl text-accent">฿{grandTotal.toLocaleString()}</p>
+                <p className="text-[11px] text-ink-2 leading-snug">
+                  {t('กรุณารอพนักงานนำใบเสร็จมาที่โต๊ะ', 'Please wait — staff will bring your bill to the table.')}
+                </p>
+              </div>
+            ) : (
+              <div className="rounded-2xl p-4 space-y-3 bg-card border border-line">
+                <div className="flex justify-between items-center">
+                  <span className="font-kanit font-bold text-sm text-title">{t('รวมทั้งโต๊ะ', 'Table total')}</span>
+                  <span className="font-mono font-extrabold text-xl text-accent">฿{grandTotal.toLocaleString()}</span>
+                </div>
+                <button
+                  onClick={() => setShowCheckoutModal(true)}
+                  className="w-full bg-cta hover:bg-cta-hover text-cta-ink font-bold py-3.5 rounded-xl transition text-sm flex items-center justify-center gap-2 shadow-md"
+                >
+                  🧾 {t('เช็กบิล / ชำระเงิน', 'Check out / Pay')}
+                </button>
+              </div>
+            )
+          )}
         </div>
       ) : (
         /* CUSTOMER MENU VIEW */
@@ -514,8 +594,8 @@ function CustomerView({
         </div>
       )}
 
-      {/* FLOATING CART BAR */}
-      {cartCount > 0 && !showStatusList && (
+      {/* FLOATING CART BAR — hidden while checking out (ordering is locked). */}
+      {cartCount > 0 && !showStatusList && !isSettling && (
         <div className="fixed bottom-14 left-0 right-0 max-w-md mx-auto px-4 py-2 z-30 pointer-events-none">
           <button
             onClick={() => setShowCartModal(true)}
@@ -753,6 +833,52 @@ function CustomerView({
               </button>
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {/* CHECK-OUT TYPE CHOICE — ปกติ (เงินสด/QR ร้าน) vs คนละครึ่ง */}
+      {showCheckoutModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end justify-center p-0">
+          <div className="surface-light bg-white rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 shadow-2xl border-t border-neutral-100">
+            <div className="flex justify-between items-start">
+              <div>
+                <h3 className="text-base font-extrabold font-kanit">{t('เลือกวิธีเช็กบิล', 'Choose checkout')}</h3>
+                <span className="text-amber-600 font-extrabold font-mono text-base block mt-0.5">฿{grandTotal.toLocaleString()}</span>
+              </div>
+              <button
+                onClick={() => setShowCheckoutModal(false)}
+                className="p-1.5 rounded-full bg-neutral-100 hover:bg-neutral-200 text-neutral-500 transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <button
+              onClick={() => handleRequestCheckout('normal')}
+              className="w-full text-left p-4 border border-neutral-200 rounded-2xl hover:border-amber-500 hover:bg-amber-50 transition flex items-center gap-3"
+            >
+              <span className="text-2xl">💵</span>
+              <div>
+                <p className="font-kanit font-bold text-sm">{t('เช็กบิลปกติ', 'Standard checkout')}</p>
+                <p className="text-[11px] text-neutral-500">{t('เงินสด หรือ สแกน QR ของร้าน', 'Cash or scan the shop QR')}</p>
+              </div>
+            </button>
+
+            <button
+              onClick={() => handleRequestCheckout('split')}
+              className="w-full text-left p-4 border border-neutral-200 rounded-2xl hover:border-amber-500 hover:bg-amber-50 transition flex items-center gap-3"
+            >
+              <span className="text-2xl">🟠</span>
+              <div>
+                <p className="font-kanit font-bold text-sm">{t('เช็กบิลคนละครึ่ง', 'Half-Half (คนละครึ่ง)')}</p>
+                <p className="text-[11px] text-neutral-500">{t('ใช้สิทธิ์คนละครึ่ง — พนักงานจะนำถุงเงินมาสแกน', 'Use คนละครึ่ง — staff will bring the ถุงเงิน phone')}</p>
+              </div>
+            </button>
+
+            <p className="text-[11px] text-neutral-400 text-center leading-snug">
+              {t('เมื่อกดเลือก ระบบจะล็อกการสั่งอาหารและแจ้งพนักงานให้มาเก็บเงินที่โต๊ะ', 'After choosing, ordering locks and staff are notified to collect payment at your table.')}
+            </p>
           </div>
         </div>
       )}

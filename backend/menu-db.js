@@ -20,6 +20,8 @@ import {
   addonRowsToAddons,
   choiceRowsToChoices,
   groupDishRows,
+  text,
+  toNumber,
 } from './menu-transform.js';
 
 // Read menu_items and hand back rows keyed by the Thai column names, so the
@@ -171,6 +173,38 @@ export async function setDishAvailability(dishId, available) {
   return rowCount;
 }
 
+// Set which shift(s) a dish appears in — 'day' | 'night' | 'both' | 'none'.
+// 'none' is the "hidden everywhere" state: the customer menu filters on
+// `theme === shift || theme === 'both'`, so a theme of 'none' matches no shift
+// and the dish drops out of both storefronts without being deleted. Whenever a
+// dish is put back on a real shift we also flip `available` back to true, so the
+// sun/moon pill is the single control the owner needs (no stale ปิดขาย state).
+// Like setDishAvailability, this rewrites every protein row behind the dish.
+export async function setDishTheme(dishId, theme) {
+  if (!(await hasColumn('theme'))) {
+    throw new Error(
+      'menu_items has no "theme" column — run: ALTER TABLE menu_items ' +
+      'ADD COLUMN theme TEXT;'
+    );
+  }
+  const dish = groupDishRows(await fetchMenuRows()).find((d) => d.id === dishId);
+  if (!dish) return 0;
+
+  const rowIds = dish.sourceRows.map((r) => r.__rowId).filter((id) => id != null);
+  if (!rowIds.length) return 0;
+
+  // Re-enabling a shift clears any leftover ปิดขาย flag so the dish actually
+  // shows; hiding it (none) leaves `available` untouched.
+  const alsoAvailable = theme !== 'none' && (await hasColumn('available'));
+  const { rowCount } = await getPool().query(
+    alsoAvailable
+      ? `UPDATE menu_items SET theme = $1, available = true WHERE id = ANY($2::int[])`
+      : `UPDATE menu_items SET theme = $1 WHERE id = ANY($2::int[])`,
+    [theme, rowIds]
+  );
+  return rowCount;
+}
+
 // Add a dish: one row per protein option, all sharing the same image.
 // `variants` is [{ meat, price }]; a dish with no protein choice passes a
 // single variant with meat '-' , matching how the imported data spells "none".
@@ -207,6 +241,88 @@ export async function insertMenuItem({
   return variants.length;
 }
 
+// Read one dish back in the exact shape the owner's form edits: หมวดหมู่ /
+// ประเภท / หัวข้อ come straight off the source rows (the app-facing menu drops
+// them), the protein rows become variants, and a dish with none reports a single
+// `price`. Returns null when the id matches no dish.
+export async function getDishForEdit(dishId) {
+  const dish = groupDishRows(await fetchMenuRows()).find((d) => d.id === dishId);
+  if (!dish) return null;
+
+  const first = dish.sourceRows[0] || {};
+  // Only rows carrying a real protein are offered as variants; a "-" row is the
+  // dish's own single price, matching how the create form treats them.
+  const variants = dish.sourceRows
+    .filter((r) => text(r['เนื้อสัตว์']))
+    .map((r) => ({ meat: r['เนื้อสัตว์'], price: toNumber(r['ราคา (บาท)'], 0) }));
+
+  return {
+    id: dish.id,
+    category: first['หมวดหมู่'] || '',
+    type: first['ประเภท'] || '',
+    subcategory: first['หัวข้อ'] || '',
+    name: dish.name,
+    theme: dish.theme,
+    imageUrl: dish.image || '',
+    price: variants.length ? null : toNumber(first['ราคา (บาท)'], 0),
+    variants,
+  };
+}
+
+// Edit an existing dish. A dish is several rows and an edit can add, drop or
+// rename its protein options, so rather than diff the two sets the old rows are
+// deleted and the new spec is inserted fresh — all inside one transaction so the
+// dish is never left half-rewritten. The on/off state is carried over from the
+// old rows (an edit is not a re-list), so a dish that was ปิดขาย stays that way.
+// Returns the number of rows written, or 0 if the id matched no dish.
+export async function updateMenuItem(dishId, {
+  category, type, subcategory, name, theme, imageUrl, variants,
+}) {
+  if (!(await hasColumn('theme'))) {
+    throw new Error(
+      'menu_items has no "theme" column — the dish could not be re-filed under ' +
+      'the day or night menu. Run: ALTER TABLE menu_items ADD COLUMN theme TEXT;'
+    );
+  }
+  const dish = groupDishRows(await fetchMenuRows()).find((d) => d.id === dishId);
+  if (!dish) return 0;
+  const rowIds = dish.sourceRows.map((r) => r.__rowId).filter((id) => id != null);
+
+  // Preserve the current on/off state, but only if the column exists to hold it.
+  const keepAvailable = (await hasColumn('available')) ? dish.available : null;
+
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (rowIds.length) {
+      await client.query(`DELETE FROM menu_items WHERE id = ANY($1::int[])`, [rowIds]);
+    }
+    for (const v of variants) {
+      if (keepAvailable === null) {
+        await client.query(
+          `INSERT INTO menu_items (category, type, subcategory, name, meat, price, image_url, theme)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [category, type, subcategory, name, v.meat, v.price, imageUrl || null, theme]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO menu_items (category, type, subcategory, name, meat, price, image_url, theme, available)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [category, type, subcategory, name, v.meat, v.price, imageUrl || null, theme, keepAvailable]
+        );
+      }
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+  return variants.length;
+}
+
 // Would this dish collide with one that already exists?
 //
 // The app's dish id is a hash of (theme|หัวข้อ|ชื่อ), so a second dish resolving
@@ -219,8 +335,16 @@ export async function insertMenuItem({
 // instead of forming a new one, the dish count does not grow — that is the
 // collision, and it catches the cases a plain name comparison misses, e.g. a
 // new "ต้มจืดเต้าหู้ หมูสับ" folding into the existing "ต้มจืดเต้าหู้".
-export async function dishIdentityTaken({ category, type, subcategory, name, theme, variants }) {
-  const existing = await fetchMenuRows();
+// `excludeDishId` lets an edit ignore the dish's own rows, so re-saving a dish
+// with its name unchanged is not flagged as colliding with itself.
+export async function dishIdentityTaken({ category, type, subcategory, name, theme, variants }, excludeDishId = null) {
+  const allRows = await fetchMenuRows();
+  let existing = allRows;
+  if (excludeDishId) {
+    const self = groupDishRows(allRows).find((d) => d.id === excludeDishId);
+    const selfIds = new Set((self?.sourceRows || []).map((r) => r.__rowId));
+    existing = allRows.filter((r) => !selfIds.has(r.__rowId));
+  }
   const candidateRows = variants.map((v) => ({
     'หมวดหมู่': category,
     'ประเภท': type,

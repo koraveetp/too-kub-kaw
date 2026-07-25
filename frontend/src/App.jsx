@@ -219,6 +219,46 @@ function App() {
     [settings.adminColors]
   );
   const [showPwaModal, setShowPwaModal] = useState(false);
+  // The browser's deferred install event (Chrome/Edge/Android fire
+  // `beforeinstallprompt` and let us call `.prompt()` on a user gesture). Held
+  // in a ref because it is single-use and must survive re-renders untouched;
+  // the boolean state below is what the UI actually reacts to.
+  const installPromptRef = useRef(null);
+  const [canInstall, setCanInstall] = useState(false);
+  // True once the app is already running as an installed PWA (standalone /
+  // home-screen launch) — no point offering to install it again.
+  const [isInstalled, setIsInstalled] = useState(false);
+
+  // Wire up the real "Add to Home Screen" flow. iOS Safari never fires
+  // `beforeinstallprompt`, so there `canInstall` stays false and the modal falls
+  // back to the manual Share-sheet instructions.
+  useEffect(() => {
+    const standalone = () =>
+      window.matchMedia('(display-mode: standalone)').matches ||
+      window.navigator.standalone === true;
+    setIsInstalled(standalone());
+
+    const onBeforeInstall = (e) => {
+      e.preventDefault(); // stop Chrome's mini-infobar; we drive the prompt ourselves
+      installPromptRef.current = e;
+      setCanInstall(true);
+    };
+    const onInstalled = () => {
+      installPromptRef.current = null;
+      setCanInstall(false);
+      setIsInstalled(true);
+      setShowPwaModal(false);
+      showToast('ติดตั้งแอปลงหน้าจอโฮมสำเร็จ!');
+    };
+
+    window.addEventListener('beforeinstallprompt', onBeforeInstall);
+    window.addEventListener('appinstalled', onInstalled);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', onBeforeInstall);
+      window.removeEventListener('appinstalled', onInstalled);
+    };
+  }, []);
+
   // Status of the very first load of shared state from the backend.
   // 'loading' -> 'ready' | 'error'. Later SSE pushes never revert this.
   const [loadState, setLoadState] = useState('loading');
@@ -358,6 +398,25 @@ function App() {
     setShowPwaModal(true);
   };
 
+  // Fire the browser's native install dialog. Only reachable when
+  // `beforeinstallprompt` has been captured (Android/Chrome/Edge); on iOS the
+  // button is hidden and the manual steps are shown instead.
+  const handleInstall = async () => {
+    const promptEvent = installPromptRef.current;
+    if (!promptEvent) return;
+    promptEvent.prompt();
+    const { outcome } = await promptEvent.userChoice;
+    // The event is single-use — a declined prompt can't be re-fired.
+    installPromptRef.current = null;
+    setCanInstall(false);
+    if (outcome === 'accepted') {
+      setShowPwaModal(false);
+      // `appinstalled` also fires and toasts, but that can lag; acknowledge now.
+    } else {
+      showToast('ยกเลิกการติดตั้ง');
+    }
+  };
+
   return (
     // The owner's colour picks ride as inline custom properties on the very
     // element that carries .theme-day / .theme-night, so they override the
@@ -368,7 +427,7 @@ function App() {
     >
       
       {/* GLOBAL TOAST */}
-      <div className={`fixed bottom-20 left-1/2 transform -translate-x-1/2 bg-neutral-900/95 text-white text-xs px-4 py-2.5 rounded-full shadow-xl z-[200] transition-all duration-300 pointer-events-none flex items-center gap-2 ${toast.show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-4 scale-90'}`}>
+      <div className={`fixed bottom-20 left-1/2 transform -translate-x-1/2 bg-neutral-900/95 dark:bg-[#2E251C]/95 text-white text-xs px-4 py-2.5 rounded-full shadow-xl z-[200] transition-all duration-300 pointer-events-none flex items-center gap-2 ${toast.show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-4 scale-90'}`}>
         <span>ℹ️</span>
         <span className="font-medium font-thai">{toast.message}</span>
       </div>
@@ -586,28 +645,39 @@ function App() {
             </div>
             <div>
               <h3 className="font-extrabold text-base font-kanit">เพิ่มไปยังหน้าจอหลัก (PWA)</h3>
-              <p className="text-xs text-neutral-500 font-thai leading-snug mt-1">ติดตั้งแอปสั่งอาหารไว้บนหน้าจอมือถือของคุณเพื่อสแกนสั่งครั้งต่อๆ ไปอย่างรวดเร็วโดยไม่ต้องค้นหาเว็บ</p>
+              <p className="text-xs text-neutral-500 font-thai leading-snug mt-1">
+                {isInstalled
+                  ? 'แอปนี้ถูกติดตั้งบนหน้าจอโฮมเรียบร้อยแล้ว เปิดใช้งานได้จากไอคอนแอปได้เลย'
+                  : 'ติดตั้งแอปสั่งอาหารไว้บนหน้าจอมือถือของคุณเพื่อสแกนสั่งครั้งต่อๆ ไปอย่างรวดเร็วโดยไม่ต้องค้นหาเว็บ'}
+              </p>
             </div>
-            <div className="bg-neutral-50 rounded-xl p-3 text-left space-y-1.5 text-[11px] font-thai text-neutral-600">
-              <div><span className="font-bold text-neutral-800">ระบบปฏิบัติการ Android:</span> กดปุ่มขีดสามขีดหรือเมนูมุมขวา เลือกหัวข้อ "เพิ่มไปยังหน้าจอหลัก"</div>
-              <div className="border-t border-neutral-100 pt-1.5"><span className="font-bold text-neutral-800">ระบบปฏิบัติการ iOS (Safari):</span> กดปุ่มแชร์รูปกล่องมีลูกศรชี้ขึ้นที่แถบนำทางล่าง แล้วเลือกเมนู "เพิ่มไปยังหน้าจอโฮม"</div>
-            </div>
+
+            {/* When the browser gives us a real install prompt (Android/Chrome/
+                Edge) a single "ติดตั้งเลย" tap does the whole thing. Otherwise —
+                iOS Safari, or a desktop that can't install — we fall back to the
+                manual per-OS steps. */}
+            {!isInstalled && !canInstall && (
+              <div className="bg-neutral-50 rounded-xl p-3 text-left space-y-1.5 text-[11px] font-thai text-neutral-600">
+                <div><span className="font-bold text-neutral-800">ระบบปฏิบัติการ Android:</span> กดปุ่มขีดสามขีดหรือเมนูมุมขวา เลือกหัวข้อ "เพิ่มไปยังหน้าจอหลัก"</div>
+                <div className="border-t border-neutral-100 pt-1.5"><span className="font-bold text-neutral-800">ระบบปฏิบัติการ iOS (Safari):</span> กดปุ่มแชร์รูปกล่องมีลูกศรชี้ขึ้นที่แถบนำทางล่าง แล้วเลือกเมนู "เพิ่มไปยังหน้าจอโฮม"</div>
+              </div>
+            )}
+
             <div className="flex gap-2 pt-1 font-thai text-xs">
-              <button 
-                onClick={() => setShowPwaModal(false)} 
+              <button
+                onClick={() => setShowPwaModal(false)}
                 className="flex-1 bg-neutral-100 hover:bg-neutral-200 font-bold py-2 rounded-xl transition text-neutral-700"
               >
                 ปิด
               </button>
-              <button 
-                onClick={() => {
-                  setShowPwaModal(false);
-                  showToast('ติดตั้งไอคอนลงหน้าจอโฮมสำเร็จ!');
-                }} 
-                className="flex-1 bg-amber-600 hover:bg-amber-700 font-bold py-2 rounded-xl transition text-white"
-              >
-                ติดตั้งด่วน
-              </button>
+              {canInstall && !isInstalled && (
+                <button
+                  onClick={handleInstall}
+                  className="flex-1 bg-amber-600 hover:bg-amber-700 font-bold py-2 rounded-xl transition text-white"
+                >
+                  ติดตั้งเลย
+                </button>
+              )}
             </div>
           </div>
         </div>

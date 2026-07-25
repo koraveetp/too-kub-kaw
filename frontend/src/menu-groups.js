@@ -20,12 +20,21 @@ export function isDrinkItem(item) {
   return item.group ? item.group === 'drink' : DRINK_CATEGORIES.has(item.category);
 }
 
+// Headings (the menu's หัวข้อ, exposed as `category`) that are served straight to
+// the table — cold towels, desserts, pre-packed snacks. Like drinks, they take
+// no plated-food extras: a ผ้าเย็น or ข้าวเหนียวมะม่วง should never offer ไข่ดาว,
+// สั่งกลับบ้าน or เป็นกับข้าว. Mirrors NON_KITCHEN_HEADINGS in kitchen.js.
+const NO_FOOD_ADDON_HEADINGS = new Set(['ผ้าเย็น', 'ของหวาน', 'ขนมหวาน', 'ขนมขบเคี้ยว']);
+
 // Extras to offer for one dish. Food and drinks get different lists — a bowl of
 // ต้มข่าไก่ should not offer ไข่มุก, and a ชาเย็น should not offer ไข่ดาว.
 // The night bar keeps a single list of its own.
 export function addonsFor(addons, theme, item) {
   if (theme === 'night') return addons?.night || [];
-  return (isDrinkItem(item) ? addons?.drink : addons?.food) || [];
+  if (isDrinkItem(item)) return addons?.drink || [];
+  // Non-course food (desserts, snacks, cold towels) offers no plated-food extras.
+  if (NO_FOOD_ADDON_HEADINGS.has(item?.category)) return [];
+  return addons?.food || [];
 }
 
 // Pick-exactly-one groups for one dish, e.g. ขนาด (ไซส์ M/L) and

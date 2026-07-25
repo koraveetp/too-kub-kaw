@@ -364,3 +364,63 @@
 .animate-slide-up {
   animation: slideup 0.3s cubic-bezier(0.2, 0.9, 0.3, 1);
 }
+
+/* --- Bill receipt slip (Xprinter XP-80T, 80mm thermal) --------------------
+   #bill-print is always in the DOM while a bill is printing, but it must never
+   show on screen — it lives off-canvas until the print media query pulls it
+   onto the page. Styled plain black-on-white (no colour/shadow) for a fast,
+   crisp monochrome thermal print; the auto-cutter cuts at the end of the page. */
+#bill-print {
+  position: fixed;
+  left: -9999px;
+  top: 0;
+  width: 72mm;
+  color: #000;
+  background: #fff;
+  font-family: 'Sarabun', 'Noto Sans Thai', system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+#bill-print .bp-center { text-align: center; }
+#bill-print .bp-shop { font-weight: 800; font-size: 21px; line-height: 1.15; }
+#bill-print .bp-doc { font-size: 13px; }
+/* Heavy "======" divider and light "------" divider. */
+#bill-print .bp-hr-eq { border-top: 3px double #000; height: 0; margin: 5px 0; }
+#bill-print .bp-hr-dash { border-top: 1px dashed #000; margin: 5px 0; }
+/* Two-column meta block: โต๊ะ/เวลา on the left, วันที่/พนักงาน on the right. */
+#bill-print .bp-meta { display: flex; justify-content: space-between; gap: 10px; }
+#bill-print .bp-meta > div { display: flex; flex-direction: column; }
+/* รายการ / Qty / ราคา — the same 3-column grid the item rows use. */
+#bill-print .bp-item { display: flex; align-items: baseline; }
+#bill-print .bp-head { font-weight: 700; }
+#bill-print .bp-name { flex: 1; padding-right: 4px; word-break: break-word; }
+#bill-print .bp-qty { width: 34px; text-align: center; flex-shrink: 0; }
+#bill-print .bp-amt { width: 66px; text-align: right; white-space: nowrap; flex-shrink: 0; }
+#bill-print .bp-sub-item .bp-name { padding-left: 4px; font-size: 12px; }
+#bill-print .bp-total-row { display: flex; justify-content: space-between; gap: 8px; font-weight: 800; font-size: 15px; }
+/* QR block: centred, with generous space above and below so the header text
+   and the footer text don't crowd the code.
+     margin: <บน> auto <ล่าง>  → เพิ่มเลขตัวแรก/ตัวท้ายเพื่อดันข้อความให้ห่างขึ้น */
+#bill-print .bp-qr { margin: 16px auto; text-align: center; }
+#bill-print .bp-qrhead { font-weight: 700; margin-bottom: 8px; }
+/* display:block + margin auto = การ์ด QR อยู่กึ่งกลางบิลพอดี */
+#bill-print .bp-qr svg { width: 42mm; height: 42mm; display: block; margin: 0 auto; }
+#bill-print .bp-foot { font-size: 12px; margin-top: 12px; }
+
+@media print {
+  /* Continuous 80mm roll, no page margins so the print starts at the paper
+     edge and the XP-80T cutter fires right after the slip. */
+  @page { size: 80mm auto; margin: 0; }
+  /* Print ONLY the slip: hide the whole app, then reveal #bill-print. */
+  body * { visibility: hidden !important; }
+  #bill-print, #bill-print * { visibility: visible !important; }
+  #bill-print {
+    left: 0 !important;
+    right: 0 !important;
+    margin: 0 auto !important;
+    width: 76mm !important;
+    padding: 3mm 2mm 6mm !important;
+    box-shadow: none !important;
+  }
+}

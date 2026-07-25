@@ -13,7 +13,7 @@ CREATE TABLE menu_items (
     meat           TEXT,                        -- เนื้อสัตว์ ("-" becomes NULL, see step 3)
     price          INTEGER NOT NULL DEFAULT 0,  -- ราคา (บาท)
     image_url      TEXT,                        -- รูปภาพ
-    theme          TEXT,                        -- 'day' | 'night' — ร้านที่เมนูนี้อยู่
+    theme          TEXT,                        -- 'day' | 'night' | 'both' | 'none' — กะที่เมนูแสดง ('none' = ซ่อนทุกที่)
     available      BOOLEAN NOT NULL DEFAULT true, -- เจ้าของเปิด/ปิดขายรายการนี้
     subcategory_en TEXT,                        -- หัวข้อ (English, optional)
     name_en        TEXT,                        -- ชื่อรายการ (English, optional)
@@ -26,6 +26,11 @@ CREATE TABLE menu_items (
 -- ==========================================================
 -- ALTER TABLE menu_items ADD COLUMN theme TEXT;
 -- ALTER TABLE menu_items ADD COLUMN available BOOLEAN NOT NULL DEFAULT true;
+-- Have a CHECK constraint on theme from an older setup? It must allow 'none'
+-- (the "hidden everywhere" state the sun/moon pill sets). Update it with:
+--   ALTER TABLE menu_items DROP CONSTRAINT menu_items_theme_chk;
+--   ALTER TABLE menu_items ADD CONSTRAINT menu_items_theme_chk
+--     CHECK (theme = ANY (ARRAY['day','night','both','none']));
 -- ALTER TABLE menu_items ADD COLUMN subcategory_en TEXT;
 -- ALTER TABLE menu_items ADD COLUMN name_en TEXT;
 -- ALTER TABLE menu_items ADD COLUMN meat_en TEXT;

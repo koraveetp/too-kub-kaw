@@ -65,6 +65,23 @@ export function dayTotals(orders, expenses, shift, dateKey) {
   return { revenue, expense, profit: revenue - expense };
 }
 
+// How the day's takings split across the money types staff actually received:
+//   cash  → เงินสด            (money in the till)
+//   qr    → เงินในบัญชีร้าน    (PromptPay straight to the shop's bank account)
+//   split → เงินในเป๋าตัง      (คนละครึ่ง — the government G-Wallet app)
+// A settled bill with no `payMethod` (older records) is folded into cash, since
+// that is what an un-tagged takings almost always was. Scoped to one day + shift.
+export function dayTakingsByMethod(orders, shift, dateKey) {
+  const takings = { cash: 0, qr: 0, split: 0 };
+  revenueOrders(orders, shift)
+    .filter((o) => orderDateKey(o) === dateKey)
+    .forEach((o) => {
+      const method = takings[o.payMethod] != null ? o.payMethod : 'cash';
+      takings[method] += Number(o.total) || 0;
+    });
+  return takings;
+}
+
 // The last `days` calendar days ending today, oldest first, each with its totals.
 // Days with no trade are still present as zeroes so the line keeps a real time
 // axis instead of silently compressing gaps.

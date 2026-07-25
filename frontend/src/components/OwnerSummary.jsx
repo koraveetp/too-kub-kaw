@@ -24,7 +24,6 @@ function OwnerSummary({ orders, expenses, showToast }) {
   const [month, setMonth] = useState(() => months[0] || todayKey().slice(0, 7));
 
   const rows = useMemo(() => summaryRows(orders, expenses, month), [orders, expenses, month]);
-  const totals = useMemo(() => summaryTotals(rows), [rows]);
 
   // The same month totals, but split by shift so day and night can be checked
   // side by side. Each shift also carries its own rows for the per-sheet export.
@@ -109,37 +108,6 @@ function OwnerSummary({ orders, expenses, showToast }) {
             <option key={m} value={m}>{monthLabel(m)}</option>
           ))}
         </select>
-      </div>
-
-      {/* MONTH TOTALS — day vs night side by side, so each shift can be read on
-          its own and against the other, with a combined row underneath. */}
-      <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs">
-        <div className="grid grid-cols-[1.1fr_1fr_1fr_1fr] gap-1.5 px-3 py-2 bg-neutral-50 border-b text-[9.5px] font-extrabold text-neutral-500 font-kanit">
-          <span>กะ</span>
-          <span className="text-right">รายรับ</span>
-          <span className="text-right">รายจ่าย</span>
-          <span className="text-right">กำไรสุทธิ</span>
-        </div>
-        {[
-          { label: 'กลางวัน', t: byShift.day },
-          { label: 'กลางคืน', t: byShift.night }
-        ].map(({ label, t }) => (
-          <div
-            key={label}
-            className="grid grid-cols-[1.1fr_1fr_1fr_1fr] gap-1.5 px-3 py-2.5 border-b border-neutral-100 text-[11px] items-center font-thai"
-          >
-            <span className="font-bold text-neutral-800">{label}</span>
-            <span className="text-right font-mono font-bold text-admin-income">{baht(t.income)}</span>
-            <span className="text-right font-mono font-bold text-admin-expense">{baht(t.expense)}</span>
-            <span className="text-right font-mono font-extrabold text-neutral-800">{baht(t.profit)}</span>
-          </div>
-        ))}
-        <div className="grid grid-cols-[1.1fr_1fr_1fr_1fr] gap-1.5 px-3 py-2.5 bg-neutral-50 text-[11px] items-center font-thai">
-          <span className="font-extrabold text-neutral-800 font-kanit">รวมทั้งเดือน</span>
-          <span className="text-right font-mono font-extrabold text-admin-income">{baht(totals.income)}</span>
-          <span className="text-right font-mono font-extrabold text-admin-expense">{baht(totals.expense)}</span>
-          <span className="text-right font-mono font-extrabold text-neutral-800">{baht(totals.profit)}</span>
-        </div>
       </div>
 
       <button

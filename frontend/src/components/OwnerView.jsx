@@ -6,7 +6,8 @@ import {
   LayoutDashboard,
   FileSpreadsheet,
   UtensilsCrossed,
-  CalendarClock
+  CalendarClock,
+  Users
 } from 'lucide-react';
 import OwnerDashboard from './OwnerDashboard';
 import OwnerSummary from './OwnerSummary';
@@ -42,6 +43,9 @@ function OwnerView({
   const [expCategory, setExpCategory] = useState(EXPENSE_CATEGORIES[0]);
   const [expAmount, setExpAmount] = useState('');
   const [expNote, setExpNote] = useState('');
+  // The day a new expense is filed under (defaults to today, but the owner can
+  // back-date a receipt they forgot to enter).
+  const [expDate, setExpDate] = useState(() => todayKey());
   // Which day's history is on screen. Defaults to today.
   const [historyDate, setHistoryDate] = useState(() => todayKey());
 
@@ -172,7 +176,7 @@ function OwnerView({
 
     const entry = {
       id: 'exp_' + Date.now().toString(36),
-      date: todayKey(),
+      date: expDate || todayKey(),
       shop: expShop,
       category: expCategory,
       amount: amountNum,
@@ -304,11 +308,22 @@ function OwnerView({
               <div className="flex justify-between items-baseline">
                 <h3 className="font-extrabold text-base font-kanit text-neutral-800">เพิ่มรายการรายจ่าย</h3>
                 <span className="text-[10px] text-neutral-500 font-medium">
-                  วันที่: {formatThaiDate(todayKey())}
+                  วันที่: {formatThaiDate(expDate)}
                 </span>
               </div>
 
               <form onSubmit={handleAddExpense} className="space-y-3 text-xs font-thai">
+                <div>
+                  <label className="block font-bold text-neutral-500 mb-1">วันที่</label>
+                  <input
+                    type="date"
+                    value={expDate}
+                    max={todayKey()}
+                    onChange={e => setExpDate(e.target.value || todayKey())}
+                    className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
+                  />
+                </div>
+
                 <div>
                   <label className="block font-bold text-neutral-500 mb-1">ชื่อร้าน</label>
                   <select
@@ -762,7 +777,6 @@ function OwnerView({
       {/* SECTION HEADER */}
       <div className="bg-admin-head p-2.5 rounded-2xl">
         <h2 className="font-extrabold text-base font-kanit">หลังบ้านผู้บริหารระบบ</h2>
-        <span className="text-[10px] text-neutral-400 font-medium">ดูแดชบอร์ดการเงิน ยอดขาย ปรับแต่งเมนู และจัดการสิทธิ์พนักงาน</span>
       </div>
 
       {/* SUB-TABS SELECTOR */}
@@ -772,11 +786,9 @@ function OwnerView({
         {[
           { id: 'dashboard', label: 'ภาพรวม', icon: LayoutDashboard },
           { id: 'menu', label: 'จัดการเมนู', icon: UtensilsCrossed },
-          // Labels are kept short: with five tabs sharing one row inside the
-          // max-w-md shell, the full wording ("บันทึกรายจ่าย") no longer fits.
           { id: 'expenses', label: 'รายจ่าย', icon: Wallet },
           { id: 'summary', label: 'สรุปยอด', icon: FileSpreadsheet },
-          { id: 'timeclock', label: 'ประวัติเข้างาน', icon: CalendarClock },
+          { id: 'timeclock', label: 'ข้อมูลพนักงาน', icon: Users },
           { id: 'settings', label: 'ตั้งค่า', icon: SettingsIcon }
         ].map(tab => {
           const Icon = tab.icon;
@@ -784,13 +796,18 @@ function OwnerView({
             <button
               key={tab.id}
               onClick={() => setSubTab(tab.id)}
+              // Icon-only tabs: the label is kept as title/aria-label for
+              // tooltips + screen readers, but not rendered as text. With six
+              // tabs sharing one row in the max-w-md shell, dropping the words
+              // gives each icon room to breathe.
+              title={tab.label}
+              aria-label={tab.label}
               // shadow-sm, not shadow-xs: shadow-xs is a Tailwind v4 class and
               // this project is on v3, where it compiles to nothing at all —
               // which is what left the selected tab as white-on-near-white.
-              className={`flex-1 py-2.5 px-0.5 rounded-lg flex items-center justify-center gap-1 transition ${tab.id === subTab ? 'bg-admin-tab text-admin-tab-ink shadow-sm' : 'text-admin-tab-idle hover:text-admin-tab-hover'}`}
+              className={`flex-1 py-2.5 px-0.5 rounded-lg flex items-center justify-center transition ${tab.id === subTab ? 'bg-admin-tab text-admin-tab-ink shadow-sm' : 'text-admin-tab-idle hover:text-admin-tab-hover'}`}
             >
-              <Icon className="w-3.5 h-3.5 flex-shrink-0" />
-              <span className="truncate">{tab.label}</span>
+              <Icon className="w-5 h-5 flex-shrink-0" />
             </button>
           );
         })}
