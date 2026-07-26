@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
-import { orderShift } from '../shift';
+import { orderShift, workdayKey, WORKDAY_START_HOUR } from '../shift';
 import { generateInvoiceNo } from '../invoice';
 import { mergeOrder, itemRound, itemStatus, statusFlowFor, deriveBillStatus, ITEM_STATUS_LABELS, ITEM_STATUS_COLORS, stampKitchenFields, checkoutStage, CHECKOUT_TYPE_LABELS, PAY_METHOD_LABELS } from '../orders';
 import KitchenBoard from './KitchenBoard';
@@ -9,12 +9,10 @@ import generatePayload from 'promptpay-qr';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   ClipboardList,
-  LayoutGrid,
   Package,
   Plus,
   Minus,
   Trash2,
-  QrCode,
   PlusCircle,
   AlertTriangle,
   Check,
@@ -35,6 +33,15 @@ import {
 const fmtBaht = (n) =>
   Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+// Chime patterns as [frequency, seconds from now] pairs. A new order is a
+// two-note "ding-dong"; a table asking to pay is a rising triple rung twice, so
+// it is unmistakably a different event and carries from across the shop.
+const NEW_ORDER_CHIME = [[880, 0], [1174, 0.14]];
+const CHECKOUT_CHIME = [
+  [1046, 0], [1318, 0.12], [1568, 0.24],
+  [1046, 0.5], [1318, 0.62], [1568, 0.74],
+];
+
 function StaffView({
   theme,
   menu, 
@@ -49,7 +56,7 @@ function StaffView({
   choices,
   timeclock
 }) {
-  const [subTab, setSubTab] = useState('orders'); // orders, take-order, tables, stock, qrcode, timeclock
+  const [subTab, setSubTab] = useState('orders'); // orders, take-order, kitchen, stock, timeclock
   // คลังวัตถุดิบ tab: read from the SQL `stock_items` table (not the mockup
   // drink `stock` used when taking an order). Loaded when the tab is opened.
   const [stockItems, setStockItems] = useState([]);
@@ -104,12 +111,11 @@ function StaffView({
   // the server's answer. The server does the real geofence + time stamping.
   const [clockBusy, setClockBusy] = useState(false);
 
-  // Today's local date key, matching the server's one-record-per-day key.
-  const todayKey = (() => {
-    const d = new Date();
-    const pad = (n) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  })();
+  // The WORKING day, matching the server's one-record-per-day key: 06:00 today →
+  // 06:00 tomorrow. Anything before 6 AM still belongs to the shift that started
+  // the evening before, so a night worker clocking out at 01:00 closes the same
+  // record they opened.
+  const todayKey = workdayKey();
   const myClockToday = (timeclock || []).find(
     (r) => r.user === activeStaffUser && r.date === todayKey
   );
@@ -144,6 +150,40 @@ function StaffView({
     );
   };
 
+  // --- "ยังไม่ได้ลงเวลา" prompt on the first open of a working day ------------
+  // Staff open the app and head straight for the board — the time clock is a tab
+  // they have to remember on their own, and a forgotten clock-in costs someone a
+  // day's wage. So the first time the staff screen is opened on a working day
+  // this account has no record for, a sheet asks them to clock in and takes them
+  // to the ลงเวลา tab. The answer is remembered per user + working day in
+  // localStorage, so it asks once rather than on every reload.
+  const [showClockPrompt, setShowClockPrompt] = useState(false);
+  const clockPromptKey = `clockPrompt:${activeStaffUser || 'unknown'}:${todayKey}`;
+
+  useEffect(() => {
+    // Already clocked in (or nobody is logged in) — nothing to ask.
+    if (!activeStaffUser || myClockToday) {
+      setShowClockPrompt(false);
+      return;
+    }
+    try {
+      if (localStorage.getItem(clockPromptKey) === '1') return;
+    } catch {
+      /* private mode / storage disabled — just ask */
+    }
+    setShowClockPrompt(true);
+  }, [activeStaffUser, clockPromptKey, myClockToday]);
+
+  const closeClockPrompt = (goToTimeclock) => {
+    try {
+      localStorage.setItem(clockPromptKey, '1');
+    } catch {
+      /* asking again after a reload is better than crashing */
+    }
+    setShowClockPrompt(false);
+    if (goToTimeclock) setSubTab('timeclock');
+  };
+
   // --- New-order notifications (toast + sound) ------------------------------
   // Track which order ids we've already seen so the first load doesn't fire a
   // burst of toasts. On mount every current order is marked seen silently; only
@@ -151,9 +191,9 @@ function StaffView({
   const seenOrderIds = useRef(null);
   const audioCtxRef = useRef(null);
 
-  // A short "ding-dong" via the Web Audio API — no audio file to ship, and a
-  // blocked/suspended context can never break the board (best-effort only).
-  const playChime = () => {
+  // Plays one of the chime patterns via the Web Audio API — no audio file to ship,
+  // and a blocked/suspended context can never break the board (best-effort only).
+  const playChime = (pattern = NEW_ORDER_CHIME) => {
     try {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       if (!Ctx) return;
@@ -161,7 +201,7 @@ function StaffView({
       const ctx = audioCtxRef.current;
       if (ctx.state === 'suspended') ctx.resume();
       const now = ctx.currentTime;
-      [[880, 0], [1174, 0.14]].forEach(([freq, at]) => {
+      pattern.forEach(([freq, at]) => {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.type = 'sine';
@@ -199,6 +239,42 @@ function StaffView({
     }
   }, [orders, shiftView]);
 
+  // --- Check-bill requests (customer tapped เช็กบิล on their phone) -----------
+  // The board card for a requesting table already shows an amber banner, but
+  // staff are often on another tab (or another table) when it happens, so the
+  // request has to come to them: a toast plus its own chime the moment it lands.
+  // Only the ids currently requesting are remembered, so a table that cancels and
+  // asks again rings a second time.
+  const seenCheckoutIds = useRef(null);
+
+  // Tables of this shift waiting to be billed — drives both the alert above and
+  // the notification below.
+  const checkoutRequests = orders.filter(
+    (o) => checkoutStage(o) === 'requested' && orderShift(o) === shiftView
+  );
+
+  useEffect(() => {
+    const requesting = orders.filter(
+      (o) => checkoutStage(o) === 'requested' && orderShift(o) === shiftView
+    );
+    const ids = new Set(requesting.map((o) => o.id));
+    // First run: whatever is already waiting was requested before this screen
+    // opened — show it on the board, but don't ring for it.
+    if (seenCheckoutIds.current === null) {
+      seenCheckoutIds.current = ids;
+      return;
+    }
+    const fresh = requesting.filter((o) => !seenCheckoutIds.current.has(o.id));
+    seenCheckoutIds.current = ids;
+    if (fresh.length === 0) return;
+    fresh.forEach((o) =>
+      showToast(
+        `🔔 โต๊ะ ${o.table} ขอเช็กบิล · ${CHECKOUT_TYPE_LABELS[o.checkout?.type] || 'เช็กบิลปกติ'} · ฿${(o.total || 0).toLocaleString()}`
+      )
+    );
+    playChime(CHECKOUT_CHIME);
+  }, [orders, shiftView]);
+
   const isDay = theme === 'day';
   const filteredMenu = menu.filter(item => item.theme === theme || item.theme === 'both');
   const categories = [...new Set(filteredMenu.map(item => item.category))];
@@ -212,12 +288,21 @@ function StaffView({
   // Filter orders for listing
   const getFilteredOrders = () => {
     // Screen the board to the selected shift first, then by status.
-    let list = [...orders]
-      .filter(o => orderShift(o) === shiftView)
-      .sort((a, b) => b.createdAt - a.createdAt);
+    const list = [...orders].filter(o => orderShift(o) === shiftView);
+
     if (orderFilter === 'active') {
-      return list.filter(o => o.status !== 'paid' && o.status !== 'cancelled');
+      // OLDEST bill on top. The table that ordered first is the one to serve
+      // first, and it must not slide down the board every time another table
+      // orders. `createdAt` is the bill's START — mergeOrder keeps it when a
+      // table orders more — so a table holds its place for the whole sitting.
+      return list
+        .filter(o => o.status !== 'paid' && o.status !== 'cancelled')
+        .sort((a, b) => a.createdAt - b.createdAt);
     }
+
+    // The other filters are history, where the most recent is what you want to
+    // read first, so those stay newest-first.
+    list.sort((a, b) => b.createdAt - a.createdAt);
     if (orderFilter !== 'all') {
       return list.filter(o => o.status === orderFilter);
     }
@@ -227,7 +312,7 @@ function StaffView({
   // Actually settle bills once a payment method is confirmed in the pay modal.
   // On payment: stamp a bill number, mark paid and record the checkout time +
   // method ('cash' | 'qr'). Kept in `orders` as paid history (OwnerView reports
-  // read it); the table frees up on its own since getTableStatus ignores paid
+  // read it); the table frees up on its own because every board view ignores paid
   // bills. billIds arrive oldest-first so running invoice numbers stay
   // chronological; numbers are built up on a working copy so bill #2 counts
   // bill #1 and each gets a distinct, sequential number.
@@ -467,7 +552,9 @@ function StaffView({
     switch (status) {
       case 'new': return 'bg-[#FDECC8] text-[#8a5a00]';
       case 'cooking': return 'bg-[#DCE9F7] text-[#2F5D8A]';
-      case 'served': return 'bg-[#DFF0E3] text-[#2C6E49]';
+      // Same light brown as the per-dish 'served' chip (ITEM_STATUS_COLORS in
+      // orders.js) — the card header and the dishes under it have to agree.
+      case 'served': return 'bg-[#EADBC8] text-[#6B4A2B]';
       case 'paid': return 'bg-[#E9E5DB] text-[#6b6656]';
       case 'cancelled': return 'bg-[#F6DAD7] text-[#9a2c22]';
       default: return 'bg-neutral-100 text-neutral-600';
@@ -672,14 +759,14 @@ function StaffView({
   };
 
   // Edit Bill Modal handlers
-  const handleOpenEditBill = (table) => {
-    const activeBill = orders.find(o => String(o.table) === String(table) && o.status !== 'paid' && o.status !== 'cancelled');
-    if (activeBill) {
-      setEditingBill(JSON.parse(JSON.stringify(activeBill))); // Deep copy
-      setEditAddMenuId('');
-    } else {
-      alert(`ไม่พบบิลค้างชำระสำหรับ โต๊ะ ${table}`);
-    }
+  // Open the edit-bill modal for one bill. This used to be reached only from the
+  // ผังโต๊ะ tab, which had to look a bill UP by table number; the board card
+  // already IS the bill, so it is copied straight from the order. Deep copy —
+  // the modal edits its own draft until บันทึก, so a cancel changes nothing.
+  const openEditBill = (order) => {
+    if (!order || order.status === 'paid' || order.status === 'cancelled') return;
+    setEditingBill(JSON.parse(JSON.stringify(order)));
+    setEditAddMenuId('');
   };
 
   const editBillTotal = (items) =>
@@ -754,17 +841,6 @@ function StaffView({
     }
   };
 
-  // Tables-tab quick checkout: print the table's open bill, which starts the
-  // print → เลือกประเภทเงิน → เคลียร์โต๊ะ flow. The money type is then chosen
-  // from the bill card on the บอร์ดรับออเดอร์ tab (or the print overlay).
-  const handleClearAndPay = (table) => {
-    const activeBill = orders.find(
-      o => String(o.table) === String(table) && o.status !== 'paid' && o.status !== 'cancelled'
-    );
-    if (!activeBill) return;
-    printBill(activeBill);
-  };
-
   // --- คลังวัตถุดิบ (SQL stock_items) ---------------------------------------
   // Load the inventory from the database whenever the tab is opened.
   const loadStockItems = async () => {
@@ -806,18 +882,6 @@ function StaffView({
     } catch (err) {
       showToast(err.message || 'เติมสต็อกทั้งหมดไม่สำเร็จ');
     }
-  };
-
-  // Helper: check table status. Occupancy is shift-agnostic — the table is busy
-  // whenever it has any unpaid/uncancelled bill, no matter which shift (day/night)
-  // the order was stamped with, so an order never "disappears" just because the
-  // ambient theme differs from the order's clock-based type.
-  const getTableStatus = (tableNum) => {
-    const activeBill = orders.find(o => String(o.table) === String(tableNum) && o.status !== 'paid' && o.status !== 'cancelled');
-    if (activeBill) {
-      return { active: true, bill: activeBill };
-    }
-    return { active: false, bill: null };
   };
 
   const renderActiveSubTab = () => {
@@ -865,9 +929,26 @@ function StaffView({
                         </span>
                         <span className="font-mono text-neutral-400 text-xs font-semibold">{order.no}</span>
                       </div>
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${getStatusColor(order.status)}`}>
-                        {getStatusLabel(order.status)}
-                      </span>
+                      {/* The four-step status row under every dish already says
+                          where the bill is, so this corner is the edit button
+                          rather than a second read-out of the same thing. The
+                          badge is kept ONLY for the two whole-bill states that
+                          row cannot show — ชำระแล้ว and ยกเลิก — which are also
+                          exactly the bills that cannot be edited. */}
+                      {order.status === 'paid' || order.status === 'cancelled' ? (
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${getStatusColor(order.status)}`}>
+                          {getStatusLabel(order.status)}
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => openEditBill(order)}
+                          title="แก้ไขบิล (เพิ่ม / ลบ / แก้จำนวน)"
+                          aria-label="แก้ไขบิล"
+                          className="p-1.5 -mr-1 rounded-lg text-neutral-400 hover:text-amber-700 hover:bg-amber-500/10 transition active:scale-95"
+                        >
+                          <Edit className="w-4 h-4" />
+                        </button>
+                      )}
                     </div>
 
                     {order.invoiceNo && (
@@ -889,39 +970,48 @@ function StaffView({
                                 <span className="h-px flex-1 bg-neutral-200" />
                               </div>
                             )}
-                            <div className="flex justify-between items-start gap-2 text-xs font-thai text-neutral-800">
-                              <div className="min-w-0">
-                                <span className="font-bold text-amber-700 mr-1.5">{item.qty}×</span>
-                                <span>{item.name}</span>
-                                {item.addOns && item.addOns.length > 0 && (
-                                  <p className="text-[9px] text-neutral-400 pl-5">พิเศษ: {item.addOns.join(', ')}</p>
-                                )}
-                                {item.note && (
-                                  <p className="text-[9px] text-red-500 italic pl-5">📝 {item.note}</p>
-                                )}
+                            {/* Two lines per dish: the dish + its price, then the
+                                status on a line of its own. Squeezed beside the
+                                price the four steps were 9px and clipped; given
+                                the full width they are readable and tappable. */}
+                            <div className="space-y-1 pb-0.5">
+                              <div className="flex justify-between items-start gap-2 text-xs font-thai text-neutral-800">
+                                <div className="min-w-0">
+                                  <span className="font-bold text-amber-700 mr-1.5">{item.qty}×</span>
+                                  <span>{item.name}</span>
+                                  {item.addOns && item.addOns.length > 0 && (
+                                    <p className="text-[9px] text-neutral-400 pl-5">พิเศษ: {item.addOns.join(', ')}</p>
+                                  )}
+                                  {item.note && (
+                                    <p className="text-[9px] text-red-500 italic pl-5">📝 {item.note}</p>
+                                  )}
+                                </div>
+                                <span className="font-mono text-neutral-500 font-medium text-xs flex-shrink-0">
+                                  ฿{(item.price + (item.addonCost || 0)) * item.qty}
+                                </span>
                               </div>
-                              <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                                <span className="font-mono text-neutral-500 font-medium">฿{(item.price + (item.addonCost || 0)) * item.qty}</span>
-                                {order.status === 'paid' || order.status === 'cancelled' ? (
+
+                              {order.status === 'paid' || order.status === 'cancelled' ? (
+                                <div className="flex justify-end">
                                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${getItemStatusColor(itemStatus(item))}`}>
                                     {getItemStatusLabel(itemStatus(item))}
                                   </span>
-                                ) : (
-                                  /* Segmented per-dish status: every step visible, tap to set. */
-                                  <div className="flex rounded-full border border-neutral-200 overflow-hidden">
-                                    {statusFlowFor(item).map(s => (
-                                      <button
-                                        key={s}
-                                        onClick={() => setItemStatusTo(order.id, idx, s)}
-                                        className={`text-[9px] font-bold px-2 py-0.5 transition active:scale-95 ${itemStatus(item) === s ? getItemStatusColor(s) : 'bg-admin-card text-neutral-300 hover:text-neutral-500'}`}
-                                        title={`เปลี่ยนสถานะเป็น ${getItemStatusLabel(s)}`}
-                                      >
-                                        {getItemStatusLabel(s)}
-                                      </button>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
+                                </div>
+                              ) : (
+                                /* Segmented per-dish status: every step visible, tap to set. */
+                                <div className="flex rounded-full border border-neutral-200 overflow-hidden">
+                                  {statusFlowFor(item).map(s => (
+                                    <button
+                                      key={s}
+                                      onClick={() => setItemStatusTo(order.id, idx, s)}
+                                      className={`flex-1 text-[10px] font-bold py-1 transition active:scale-95 ${itemStatus(item) === s ? getItemStatusColor(s) : 'bg-admin-card text-neutral-300 hover:text-neutral-500'}`}
+                                      title={`เปลี่ยนสถานะเป็น ${getItemStatusLabel(s)}`}
+                                    >
+                                      {getItemStatusLabel(s)}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
                             </div>
                           </React.Fragment>
                         );
@@ -1190,70 +1280,6 @@ function StaffView({
           </div>
         );
 
-      case 'tables':
-        return (
-          <div className="space-y-4">
-            <div className="flex justify-between items-center">
-              <h2 className="font-extrabold text-sm font-kanit uppercase tracking-wider text-neutral-400">ผังโต๊ะให้บริการทั้งหมด</h2>
-            </div>
-            
-            <div className="grid grid-cols-3 gap-3">
-              {Array.from({ length: settings.tables }, (_, i) => {
-                const tableNum = i + 1;
-                const status = getTableStatus(tableNum);
-                return (
-                  <div 
-                    key={tableNum}
-                    onClick={() => {
-                      if (status.active) {
-                        handleOpenEditBill(tableNum);
-                      } else {
-                        setTargetTable(String(tableNum));
-                        setSubTab('take-order');
-                      }
-                    }}
-                    className={`border rounded-2xl p-3.5 flex flex-col justify-between items-center text-center cursor-pointer transition hover:scale-[1.03] active:scale-[0.97] h-28 relative shadow-xs ${status.active ? 'bg-amber-500/10 border-amber-500 text-amber-900 dark:text-amber-200' : 'bg-admin-card border-neutral-200 text-neutral-600'}`}
-                  >
-                    <span className="font-bold text-xs uppercase text-neutral-400 font-kanit">โต๊ะ {tableNum}</span>
-                    <span className="text-xl">{status.active ? '🍛' : '🍽️'}</span>
-                    
-                    {status.active ? (
-                      <div className="space-y-0.5">
-                        <span className="font-mono text-xs font-extrabold block">฿{status.bill.total.toLocaleString()}</span>
-                        {checkoutStage(status.bill) === 'requested' ? (
-                          <span className="text-[9px] bg-red-500 text-white px-1.5 py-0.5 rounded-full font-bold animate-pulse">ขอเช็กบิล</span>
-                        ) : checkoutStage(status.bill) === 'printed' ? (
-                          <span className="text-[9px] bg-emerald-600 text-white px-1.5 py-0.5 rounded-full font-bold">รอรับเงิน</span>
-                        ) : (
-                          <span className="text-[9px] bg-amber-500 text-white px-1.5 py-0.5 rounded-full font-bold">มีออเดอร์</span>
-                        )}
-                      </div>
-                    ) : (
-                      <span className="text-[9px] text-neutral-400 font-medium">ว่าง</span>
-                    )}
-
-                    {status.active && (
-                      <button 
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleClearAndPay(tableNum);
-                        }}
-                        className="absolute -top-1.5 -right-1.5 bg-green-600 text-white rounded-full p-1 shadow-md hover:bg-green-700"
-                        title="เช็คบิล/เคลียร์โต๊ะ"
-                      >
-                        <Check className="w-3.5 h-3.5 stroke-[2.5]" />
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-            <div className="bg-neutral-50 p-3 rounded-2xl text-[11px] font-thai text-neutral-500 leading-normal">
-              💡 คลิกโต๊ะที่ <b className="text-amber-700">ว่าง</b> เพื่อไปจดสั่งอาหารแทนลูกค้า หรือคลิกโต๊ะที่มี <b className="text-amber-700">ออเดอร์ค้าง</b> เพื่อเปิดเมนูแก้ไขบิล/เช็คบิลชำระเงิน
-            </div>
-          </div>
-        );
-
       case 'stock': {
         // Warn when an item drops to this many units or fewer (stock_items has
         // no per-item threshold column, so one shared level is used).
@@ -1379,7 +1405,12 @@ function StaffView({
             {/* TODAY CARD */}
             <div className="bg-admin-card border rounded-2xl p-5 shadow-xs space-y-4 text-center">
               <div>
-                <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider block">วันนี้ · {new Date().toLocaleDateString('th-TH', { weekday: 'long', day: 'numeric', month: 'long' })}</span>
+                {/* The WORKING day, not the wall date: at 01:00 the record still
+                    belongs to the shift that started the previous evening, so
+                    showing the calendar date here would contradict it. */}
+                <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider block">
+                  วันทำงาน · {new Date(`${todayKey}T12:00:00`).toLocaleDateString('th-TH', { weekday: 'long', day: 'numeric', month: 'long' })}
+                </span>
                 <span className="font-kanit font-extrabold text-base text-neutral-800">{activeStaffUser || 'ไม่ได้เข้าสู่ระบบ'}</span>
               </div>
 
@@ -1421,6 +1452,10 @@ function StaffView({
                 <MapPin className="w-3 h-3" />
                 <span>ลงเวลาได้เฉพาะเมื่ออยู่ในพื้นที่ร้าน (รัศมี 50 ม.) — ต้องอนุญาตการเข้าถึงตำแหน่ง</span>
               </p>
+              <p className="text-[10px] text-neutral-400 font-medium">
+                นับเป็น 1 วันทำงาน ตั้งแต่ {String(WORKDAY_START_HOUR).padStart(2, '0')}:00 ถึง{' '}
+                {String(WORKDAY_START_HOUR).padStart(2, '0')}:00 ของวันถัดไป
+              </p>
             </div>
 
             {/* MY RECENT HISTORY */}
@@ -1445,62 +1480,6 @@ function StaffView({
         );
       }
 
-      case 'qrcode':
-        const urlToPrint = settings.baseUrl || window.location.origin + window.location.pathname;
-        return (
-          <div className="space-y-4">
-            <div className="border-l-4 border-amber-600 pl-2">
-              <h2 className="font-extrabold text-sm font-kanit uppercase tracking-wider text-neutral-400">พิมพ์/บันทึก QR Code ประจำโต๊ะ</h2>
-              <span className="text-[10px] text-neutral-400 font-medium">แต่ละโต๊ะมี 2 QR แยกกลางวัน/กลางคืน — สแกนอันไหนล็อกกะนั้นทันที</span>
-            </div>
-
-            <div className="grid grid-cols-1 gap-4">
-              {Array.from({ length: settings.tables }, (_, i) => {
-                const table = i + 1;
-                // Two explicit links per table: the day storefront and the night
-                // bar. The customer app locks the shift from whichever it scans.
-                const variants = [
-                  { key: 'day', label: 'กลางวัน', url: `${urlToPrint}?table-day=${table}`, tone: 'bg-amber-100 text-amber-800' },
-                  { key: 'night', label: 'กลางคืน', url: `${urlToPrint}?table-night=${table}`, tone: 'bg-indigo-100 text-indigo-800' },
-                ];
-
-                return (
-                  <div
-                    key={table}
-                    className="bg-admin-card border border-neutral-200 rounded-2xl p-4 shadow-xs max-w-xs mx-auto w-full space-y-3"
-                  >
-                    <b className="font-kanit text-neutral-800 text-sm block text-center">โต๊ะให้บริการหมายเลข {table}</b>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      {variants.map((v) => {
-                        const src = `https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(v.url)}`;
-                        return (
-                          <div key={v.key} className="flex flex-col items-center space-y-1.5">
-                            <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${v.tone}`}>{v.label}</span>
-                            <div className="w-full aspect-square bg-neutral-50 rounded-xl border flex items-center justify-center p-2 shadow-inner">
-                              <img src={src} className="w-full h-full object-contain" alt={`QR โต๊ะ ${table} ${v.label}`} />
-                            </div>
-                            <p className="text-[9px] text-neutral-400 font-mono break-all text-center leading-tight">{v.url}</p>
-                            <a
-                              href={src}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex items-center gap-1 text-[9px] bg-neutral-100 hover:bg-neutral-200 border text-neutral-700 font-bold px-2 py-1 rounded-lg transition"
-                            >
-                              <QrCode className="w-3 h-3" />
-                              <span>ดาวน์โหลด</span>
-                            </a>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        );
-
       default:
         return null;
     }
@@ -1509,16 +1488,37 @@ function StaffView({
   return (
     <div className="space-y-4 font-thai text-sm">
 
+      {/* CHECK-BILL ALERT — stays on screen (on every tab) for as long as a table
+          is waiting to be billed, so the toast+chime is never the only warning.
+          Tapping it jumps to the board where พิมพ์บิล lives. */}
+      {checkoutRequests.length > 0 && (
+        <button
+          onClick={() => setSubTab('orders')}
+          className="w-full flex items-center gap-2.5 bg-amber-100 border border-amber-300 text-amber-900 rounded-2xl px-3.5 py-2.5 text-left transition hover:bg-amber-200 active:scale-[0.99] animate-pulse-slow"
+        >
+          <Bell className="w-4 h-4 shrink-0" />
+          <span className="text-xs font-bold flex-1">
+            โต๊ะ {checkoutRequests.map((o) => o.table).join(', ')} ขอเช็กบิล
+            <span className="block text-[10px] font-semibold text-amber-800/80">
+              แตะเพื่อไปพิมพ์บิลที่หน้าบอร์ด
+            </span>
+          </span>
+          <span className="bg-amber-600 text-white text-[11px] font-extrabold rounded-full px-2 py-0.5 font-mono shrink-0">
+            {checkoutRequests.length}
+          </span>
+        </button>
+      )}
+
       {/* HORIZONTAL TAB CONTROL */}
       <div className="flex gap-1 bg-neutral-100 rounded-xl p-1 text-[9px] font-bold">
+        {/* Ordered the way a shift runs: read the board, take an order, cook it,
+            then the two things touched occasionally (คลัง, ลงเวลา). */}
         {[
-          { id: 'orders', label: 'บอร์ดรับออเดอร์', icon: ClipboardList },
-          { id: 'kitchen', label: 'ครัว (จับกลุ่ม)', icon: ChefHat },
-          { id: 'take-order', label: 'รับออเดอร์โต๊ะ', icon: PlusCircle },
-          { id: 'tables', label: 'ผัง/เช็คบิลโต๊ะ', icon: LayoutGrid },
-          { id: 'stock', label: isDay ? 'คลังวัตถุดิบ' : 'คลังเครื่องดื่ม', icon: Package },
+          { id: 'orders', label: 'บอร์ด', icon: ClipboardList },
+          { id: 'take-order', label: 'รับออเดอร์', icon: PlusCircle },
+          { id: 'kitchen', label: 'ครัว', icon: ChefHat },
+          { id: 'stock', label: isDay ? 'คลัง' : 'คลังเครื่องดื่ม', icon: Package },
           { id: 'timeclock', label: 'ลงเวลา', icon: Clock },
-          { id: 'qrcode', label: 'โต๊ะ & QR', icon: QrCode }
         ].map(tab => {
           const Icon = tab.icon;
           return (
@@ -1536,6 +1536,47 @@ function StaffView({
 
       {/* PRIMARY SUB-TAB RENDER VIEW */}
       {renderActiveSubTab()}
+
+      {/* CLOCK-IN PROMPT — first open of a working day with no record yet */}
+      {showClockPrompt && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[110] flex items-end justify-center p-0">
+          <div className="bg-admin-card rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 shadow-2xl border-t border-neutral-100">
+            <div className="flex items-start gap-3">
+              <span className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
+                <Clock className="w-5 h-5" />
+              </span>
+              <div className="min-w-0">
+                <h3 className="text-base font-extrabold font-kanit">ยังไม่ได้ลงเวลาเข้างาน</h3>
+                <p className="text-[11px] text-neutral-500 font-medium leading-relaxed">
+                  สวัสดี {activeStaffUser} — กดลงเวลาเข้างานก่อนเริ่มงานนะ
+                </p>
+              </div>
+            </div>
+
+            <p className="text-[11px] text-neutral-500 font-medium bg-neutral-50 border border-neutral-150 rounded-xl p-3 leading-relaxed">
+              รอบวันทำงานเริ่ม {String(WORKDAY_START_HOUR).padStart(2, '0')}:00 ของวันนี้
+              ถึง {String(WORKDAY_START_HOUR).padStart(2, '0')}:00 ของวันถัดไป —
+              กะกลางคืนที่เลิกงานหลังเที่ยงคืนจึงยังนับเป็นวันเดียวกัน
+            </p>
+
+            <div className="flex gap-2 text-xs">
+              <button
+                onClick={() => closeClockPrompt(false)}
+                className="flex-1 bg-neutral-150 hover:bg-neutral-200 text-neutral-700 font-bold py-3 rounded-xl transition"
+              >
+                ไว้ทีหลัง
+              </button>
+              <button
+                onClick={() => closeClockPrompt(true)}
+                className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl transition flex items-center justify-center gap-1.5"
+              >
+                <Clock className="w-4 h-4" />
+                <span>ไปหน้าลงเวลา</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ITEM DETAIL MODAL (add-ons + notes + qty) — same options as customer */}
       {selectedItem && (

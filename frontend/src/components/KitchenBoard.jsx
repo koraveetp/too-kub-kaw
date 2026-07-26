@@ -1,5 +1,7 @@
 import React, { useMemo, useState } from 'react';
-import { ChefHat, Check, Scissors, Plus, X } from 'lucide-react';
+// ChefHat is the empty-board illustration only — the action buttons are text,
+// so a cook reads the word, not an icon they have to decode.
+import { ChefHat, Scissors, Plus, X } from 'lucide-react';
 import { kitchenBoard } from '../kitchen';
 import { deriveBillStatus, ITEM_STATUS_LABELS, ITEM_STATUS_COLORS } from '../orders';
 
@@ -98,96 +100,89 @@ function KitchenBoard({ orders, setOrders, menu, showToast, shiftView }) {
   return (
     <div className="space-y-2.5 font-thai">
       {cards.map((batch) => {
-        const chip = ITEM_STATUS_COLORS[batch.status];
-        const queueLabel = batch.queues.length > 1
-          ? `คิว ${batch.queues[0]}–${batch.queues[batch.queues.length - 1]}`
-          : `คิว ${batch.queues[0]}`;
         const candidates = inKitchenByName.get(batch.name) || [];
+        // The card shows its state ONCE, on the button — and the button is
+        // labelled and coloured with the status it MOVES the batch to, which is
+        // the only thing a cook has to decide about it. A separate status chip
+        // saying "อยู่ในครัว" next to a button saying "กำลังทำ" was two readings
+        // of the same fact, in two colours, neither of them the action.
+        const next = batch.status === 'in_kitchen' ? 'in_progress' : 'completed';
+        const advance = () => (batch.status === 'in_kitchen' ? startBatch(batch) : completeBatch(batch));
+        const showTools = batch.status === 'in_progress'
+          && (batch.members.length > 1 || candidates.length > 0);
 
         return (
           <div
             key={batch.id}
             className={`bg-admin-card border rounded-2xl p-3 shadow-xs ${batch.isBatch ? 'border-amber-300 ring-1 ring-amber-200' : 'border-line'}`}
           >
-            {/* Header */}
-            <div className="flex items-start gap-2.5">
-              <div className="w-11 h-11 rounded-xl bg-amber-500 text-white flex flex-col items-center justify-center flex-shrink-0 leading-none">
-                <span className="font-extrabold text-lg font-mono">{batch.totalQty}</span>
-                <span className="text-[8px] font-bold">จาน</span>
+            {/* One row: how many · what (and for whom) · what to press.
+                Vertically centred so a one-table card and a four-table card
+                both read as the same shape from across the kitchen. */}
+            <div className="flex items-center gap-3">
+              <div className="w-14 h-14 rounded-2xl bg-amber-500 text-white flex items-center justify-center flex-shrink-0">
+                <span className="font-extrabold text-xl font-mono leading-none">{batch.totalQty}x</span>
               </div>
+
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className="font-extrabold text-sm text-neutral-800 truncate">{batch.name}</span>
-                  {batch.isBatch && (
-                    <span className="text-[9px] font-extrabold bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full">
-                      รวม {batch.members.length} โต๊ะ
-                    </span>
-                  )}
-                </div>
-                <div className="flex items-center gap-1.5 mt-0.5">
-                  <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${chip}`}>
-                    {ITEM_STATUS_LABELS[batch.status]}
-                  </span>
-                  <span className="text-[10px] text-neutral-400 font-bold">{queueLabel}</span>
+                {/* Wraps rather than truncates: with a fixed-width button beside
+                    it there is not much room on a phone, and "ผัดกระเทียม…" tells
+                    a cook nothing. A second line costs a few pixels. */}
+                <span className="block font-extrabold text-base text-neutral-800 leading-tight break-words">
+                  {batch.name}
+                </span>
+                {/* Per-table breakdown. On a batch card this doubles as the
+                    "how many tables" count, which is why no separate pill says
+                    it. */}
+                <div className="mt-0.5 space-y-0.5">
+                  {batch.members.map((m) => (
+                    <div key={m.uid} className="flex items-baseline gap-1.5 text-[11px] flex-wrap">
+                      <span className="font-bold text-neutral-600 whitespace-nowrap">โต๊ะ {m.table}</span>
+                      <span className="font-mono text-amber-600 font-bold">{m.qty}x</span>
+                      {m.addOns.length > 0 && (
+                        <span className="text-neutral-500">+{m.addOns.join(', ')}</span>
+                      )}
+                      {m.note && <span className="text-red-500 italic">📝 {m.note}</span>}
+                    </div>
+                  ))}
                 </div>
               </div>
-            </div>
 
-            {/* Per-table breakdown */}
-            <div className="mt-2 pl-1 space-y-1">
-              {batch.members.map((m) => (
-                <div key={m.uid} className="flex items-start gap-2 text-[11px]">
-                  <span className="font-bold text-neutral-500 whitespace-nowrap">โต๊ะ {m.table}</span>
-                  <span className="font-mono text-amber-700 font-bold">{m.qty}×</span>
-                  <div className="min-w-0">
-                    {m.addOns.length > 0 && (
-                      <span className="text-neutral-500">+ {m.addOns.join(', ')}</span>
-                    )}
-                    {m.note && <span className="text-red-500 italic">📝 {m.note}</span>}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* Actions */}
-            <div className="mt-2.5 flex items-center gap-2">
-              {batch.status === 'in_kitchen' && (
+              {/* Big enough to hit with a wet hand without looking straight at
+                  it — this is the one control on the card. */}
+              <div className="w-[88px] sm:w-24 flex-shrink-0 space-y-1.5">
                 <button
-                  onClick={() => startBatch(batch)}
-                  className="flex-1 bg-[#E6DAF7] hover:brightness-95 text-[#5B3A9A] font-bold py-2 rounded-xl text-xs transition flex items-center justify-center gap-1.5"
+                  onClick={advance}
+                  className={`w-full py-5 rounded-2xl font-extrabold text-sm transition hover:brightness-95 ${ITEM_STATUS_COLORS[next]}`}
                 >
-                  <ChefHat className="w-4 h-4" /> กำลังทำ
+                  {ITEM_STATUS_LABELS[next]}
                 </button>
-              )}
 
-              {batch.status === 'in_progress' && (
-                <>
-                  <button
-                    onClick={() => completeBatch(batch)}
-                    className="flex-1 bg-[#DCEFE0] hover:brightness-95 text-[#2C6E49] font-bold py-2 rounded-xl text-xs transition flex items-center justify-center gap-1.5"
-                  >
-                    <Check className="w-4 h-4" /> เสร็จแล้ว
-                  </button>
-                  {batch.members.length > 1 && (
-                    <button
-                      onClick={() => setToolOpen(toolOpen === `split-${batch.id}` ? null : `split-${batch.id}`)}
-                      title="แยกจานออกจากกลุ่ม"
-                      className="px-2.5 py-2 border border-neutral-200 rounded-xl text-neutral-500 hover:bg-neutral-50 transition"
-                    >
-                      <Scissors className="w-4 h-4" />
-                    </button>
-                  )}
-                  {candidates.length > 0 && (
-                    <button
-                      onClick={() => setToolOpen(toolOpen === `add-${batch.id}` ? null : `add-${batch.id}`)}
-                      title="ดึงเมนูเดียวกันจากโต๊ะอื่นเข้ากลุ่ม"
-                      className="px-2.5 py-2 border border-neutral-200 rounded-xl text-neutral-500 hover:bg-neutral-50 transition"
-                    >
-                      <Plus className="w-4 h-4" />
-                    </button>
-                  )}
-                </>
-              )}
+                {showTools && (
+                  <div className="flex gap-1.5">
+                    {batch.members.length > 1 && (
+                      <button
+                        onClick={() => setToolOpen(toolOpen === `split-${batch.id}` ? null : `split-${batch.id}`)}
+                        title="แยกจานออกจากกลุ่ม"
+                        aria-label="แยกจานออกจากกลุ่ม"
+                        className="flex-1 py-1.5 border border-line rounded-xl text-neutral-500 hover:bg-neutral-100 transition flex items-center justify-center"
+                      >
+                        <Scissors className="w-4 h-4" />
+                      </button>
+                    )}
+                    {candidates.length > 0 && (
+                      <button
+                        onClick={() => setToolOpen(toolOpen === `add-${batch.id}` ? null : `add-${batch.id}`)}
+                        title="ดึงเมนูเดียวกันจากโต๊ะอื่นเข้ากลุ่ม"
+                        aria-label="ดึงเมนูเดียวกันจากโต๊ะอื่นเข้ากลุ่ม"
+                        className="flex-1 py-1.5 border border-line rounded-xl text-neutral-500 hover:bg-neutral-100 transition flex items-center justify-center"
+                      >
+                        <Plus className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* ✂️ split tray */}

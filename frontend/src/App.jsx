@@ -1,10 +1,9 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import CustomerView from './components/CustomerView';
 import StaffView from './components/StaffView';
 import OwnerView from './components/OwnerView';
 import LoginPage from './components/LoginPage';
 import { fetchState, saveResource, subscribeToState, login, setAuthToken } from './api';
-import { paletteStyle } from './admin-theme';
 import { shiftNow } from './shift';
 import { ShieldCheck, Key, LogOut, Sun, Moon, Smartphone, Languages } from 'lucide-react';
 import logoImg from './assets/logo.jpg';
@@ -84,10 +83,7 @@ const DEFAULT_SETTINGS = {
   baseUrl: '',
   // PromptPay ID of the shop (mobile no. or citizen ID) — powers the
   // pay-by-QR option at checkout. Empty disables the QR choice.
-  promptpayId: '',
-  // Back-office colour overrides picked in ตั้งค่า, keyed by CSS variable.
-  // Empty means "use the defaults from index.css".
-  adminColors: {}
+  promptpayId: ''
 };
 
 // The saved login session (if any), shape { user, name, token, role, shop }.
@@ -213,11 +209,6 @@ function App() {
   const [activeRole, setActiveRole] = useState(() => readSession()?.role || null);
   const [activeShop, setActiveShop] = useState(() => readSession()?.shop || null);
   const [toast, setToast] = useState({ show: false, message: '' });
-  // Recomputed only when the owner actually changes a colour.
-  const adminPaletteStyle = useMemo(
-    () => paletteStyle(settings.adminColors),
-    [settings.adminColors]
-  );
   const [showPwaModal, setShowPwaModal] = useState(false);
   // The browser's deferred install event (Chrome/Edge/Android fire
   // `beforeinstallprompt` and let us call `.prompt()` on a user gesture). Held
@@ -418,14 +409,10 @@ function App() {
   };
 
   return (
-    // The owner's colour picks ride as inline custom properties on the very
-    // element that carries .theme-day / .theme-night, so they override the
-    // stylesheet's defaults for everything inside without a global reset.
     <div
       className={`min-h-screen transition-colors duration-500 flex flex-col ${theme === 'day' ? 'theme-day' : 'theme-night'}`}
-      style={adminPaletteStyle}
     >
-      
+
       {/* GLOBAL TOAST */}
       <div className={`fixed bottom-20 left-1/2 transform -translate-x-1/2 bg-neutral-900/95 dark:bg-[#2E251C]/95 text-white text-xs px-4 py-2.5 rounded-full shadow-xl z-[200] transition-all duration-300 pointer-events-none flex items-center gap-2 ${toast.show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-4 scale-90'}`}>
         <span>ℹ️</span>

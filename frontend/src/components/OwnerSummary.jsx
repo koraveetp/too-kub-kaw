@@ -1,8 +1,8 @@
 import React, { useState, useMemo } from 'react';
 import * as XLSX from 'xlsx';
-import { FileSpreadsheet } from 'lucide-react';
-import { shopLabel, formatThaiDate, THAI_MONTHS_FULL, todayKey } from '../expenses';
-import { availableMonths, summaryRows, summaryTotals } from '../stats';
+import { FileSpreadsheet, Trash2 } from 'lucide-react';
+import { shopLabel, THAI_MONTHS_FULL } from '../expenses';
+import { availableMonths, summaryRows, summaryTotals, ledgerRows } from '../stats';
 
 const baht = (n) => Math.round(n).toLocaleString();
 
@@ -19,11 +19,38 @@ function shortDate(key) {
   return `${d}/${m}/${y}`;
 }
 
-function OwnerSummary({ orders, expenses, showToast }) {
-  const months = useMemo(() => availableMonths(orders, expenses), [orders, expenses]);
-  const [month, setMonth] = useState(() => months[0] || todayKey().slice(0, 7));
+// The ประเภท filter above the table.
+const KIND_FILTERS = [
+  { id: 'all', label: 'ทั้งหมด' },
+  { id: 'income', label: 'รายรับ' },
+  { id: 'expense', label: 'รายจ่าย' },
+];
 
+// The money half of the back office: pick a month, read the takings against the
+// outgoings, export the sheet. Rendered under the expense entry form inside the
+// การเงิน tab — the two used to be separate tabs (รายจ่าย / สรุปยอด).
+//
+// `onDeleteExpense(id, category, amount)` comes from OwnerView, which owns the
+// expenses list. Income rows have no id and so are never deletable here.
+//
+// `month` / `setMonth` are lifted to OwnerView too: saving an expense dated into
+// another month has to move this table to it, and only the form knows that.
+function OwnerSummary({ orders, expenses, month, setMonth, showToast, onDeleteExpense }) {
+  const months = useMemo(() => availableMonths(orders, expenses), [orders, expenses]);
+  const [kind, setKind] = useState('all'); // all | income | expense
+
+  // Two shapes of the same month: `ledger` is what the table shows (every expense
+  // on its own row), `rows` is the rolled-up shape the Excel export wants.
+  const ledger = useMemo(() => ledgerRows(orders, expenses, month), [orders, expenses, month]);
   const rows = useMemo(() => summaryRows(orders, expenses, month), [orders, expenses, month]);
+
+  // Totals always cover the WHOLE month, never the filtered view — the filter is
+  // for reading the list, not for changing what the month earned.
+  const totals = useMemo(() => summaryTotals(ledger), [ledger]);
+  const visible = useMemo(
+    () => (kind === 'all' ? ledger : ledger.filter((r) => r.kind === kind)),
+    [ledger, kind]
+  );
 
   // The same month totals, but split by shift so day and night can be checked
   // side by side. Each shift also carries its own rows for the per-sheet export.
@@ -82,27 +109,22 @@ function OwnerSummary({ orders, expenses, showToast }) {
   return (
     <div className="space-y-4">
 
-      <div className="flex justify-between items-baseline">
-        {/* These two sit straight on the app shell, whose background flips from
-            cream by day to near-black by night — so they take their colour from
-            the theme (text-ink / text-ink-2) instead of naming one. A fixed
-            neutral-800 was invisible at night; a fixed white would be invisible
-            by day. */}
-        <h3 className="font-extrabold text-base font-kanit text-ink">ข้อมูลเชิงลึก &amp; ส่งออก</h3>
-        <span className="text-[10px] text-ink-2 font-medium">
-          วันที่: {formatThaiDate(todayKey())}
-        </span>
-      </div>
-
-      <div>
-        <label className="block text-[10px] font-bold text-ink-2 mb-1">เลือกเดือน &amp; ปี</label>
-        {/* text-neutral-800 rather than an inherited colour: the box carries
-            its own background (bg-admin-field), so its text has to track that
+      {/* HISTORY — replaces the old ประวัติการใช้จ่าย, now with income in it.
+          There is deliberately no totals strip here: the dashboard's own
+          สรุปยอดรายเดือน block already carries รายรับ / รายจ่าย / กำไรสุทธิ, and two
+          copies of the same three numbers drift apart in the reader's head. */}
+      <div className="flex justify-between items-center gap-2 pl-1 flex-wrap">
+        <h3 className="font-extrabold text-base font-kanit text-neutral-800 whitespace-nowrap">
+          ประวัติรายรับ-รายจ่าย
+        </h3>
+        {/* Month picker — this is what scopes the table AND the export below.
+            text-neutral-600 rather than an inherited colour: the box carries its
+            own background (bg-admin-field), so its text has to track that
             surface rather than the shell behind it. Both flip together. */}
         <select
           value={month}
           onChange={e => setMonth(e.target.value)}
-          className="w-full border rounded-xl p-2.5 bg-admin-field text-neutral-800 text-xs font-bold focus:outline-none focus:ring-1 focus:ring-amber-500"
+          className="border rounded-full py-1.5 px-3 bg-admin-field text-[11px] font-bold text-neutral-600 focus:outline-none focus:ring-1 focus:ring-amber-500"
         >
           {months.map(m => (
             <option key={m} value={m}>{monthLabel(m)}</option>
@@ -110,45 +132,98 @@ function OwnerSummary({ orders, expenses, showToast }) {
         </select>
       </div>
 
-      <button
-        onClick={handleExport}
-        className="w-full bg-admin-cta hover:bg-admin-cta-hover text-admin-cta-ink font-bold py-3 rounded-2xl transition flex items-center justify-center gap-2 font-kanit"
-      >
-        <FileSpreadsheet className="w-4 h-4" />
-        ส่งออกข้อมูล (Export Data)
-      </button>
+      {/* ประเภท filter: read the takings and the outgoings on their own. */}
+      <div className="flex gap-1 bg-admin-bar rounded-full p-0.5 text-[10px] font-bold">
+        {KIND_FILTERS.map(f => (
+          <button
+            key={f.id}
+            onClick={() => setKind(f.id)}
+            className={`flex-1 px-3 py-1.5 rounded-full transition ${
+              kind === f.id
+                ? 'bg-admin-tab text-admin-tab-ink shadow-sm'
+                : 'text-admin-tab-idle hover:text-admin-tab-hover'
+            }`}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
 
-      {/* ROWS — income is one line per day, never bill by bill */}
+      {/* ROWS — income is one line per day per shop, never bill by bill;
+          each expense keeps its own row so its note and delete survive. */}
       <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs">
-        <div className="grid grid-cols-[1.1fr_1.3fr_0.9fr_1.6fr_1fr] gap-1.5 px-3 py-2 bg-neutral-50 border-b text-[9.5px] font-extrabold text-neutral-500 font-kanit">
+        <div className="grid grid-cols-[1fr_1.1fr_0.8fr_1.4fr_0.9fr_auto] gap-1.5 px-3 py-2 bg-neutral-50 border-b text-[9.5px] font-extrabold text-neutral-500 font-kanit">
           <span>วันที่</span>
           <span>ร้าน</span>
           <span>ประเภท</span>
           <span>รายการ</span>
           <span className="text-right">จำนวนเงิน ฿</span>
+          <span className="w-6" />
         </div>
 
-        {rows.length > 0 ? (
-          rows.map(r => (
+        {visible.length > 0 ? (
+          visible.map(r => (
             <div
-              key={`${r.date}|${r.shop}|${r.kind}|${r.label}`}
-              className="grid grid-cols-[1.1fr_1.3fr_0.9fr_1.6fr_1fr] gap-1.5 px-3 py-2.5 border-b border-neutral-100 last:border-0 text-[10px] items-center font-thai"
+              key={r.key}
+              className="grid grid-cols-[1fr_1.1fr_0.8fr_1.4fr_0.9fr_auto] gap-1.5 px-3 py-2.5 border-b border-neutral-100 last:border-0 text-[10px] items-center font-thai"
             >
               <span className="font-mono text-neutral-600">{shortDate(r.date)}</span>
               <span className="font-bold text-neutral-800 leading-tight">{shopLabel(r.shop)}</span>
               <span className={r.kind === 'income' ? 'text-admin-income font-bold' : 'text-admin-expense font-bold'}>
                 {r.kind === 'income' ? 'รายรับ' : 'รายจ่าย'}
               </span>
-              <span className="text-neutral-500 leading-tight">{r.label}</span>
+              <span className="text-neutral-500 leading-tight truncate" title={r.note || r.label}>
+                {r.label}
+                {r.note && <span className="block text-[9px] text-neutral-400 truncate">{r.note}</span>}
+              </span>
               <span className="text-right font-mono font-bold text-neutral-800">{baht(r.amount)}</span>
+              {/* Only outgoings can be removed — takings belong to the bills. */}
+              {r.id ? (
+                <button
+                  onClick={() => onDeleteExpense?.(r.id, r.label, r.amount)}
+                  className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-500/10 rounded-lg transition"
+                  title="ลบรายการ"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              ) : (
+                <span className="w-6" />
+              )}
             </div>
           ))
         ) : (
           <p className="text-neutral-500 text-xs py-6 text-center font-medium">
-            ยังไม่มีข้อมูลในเดือน {monthLabel(month)}
+            {kind === 'income'
+              ? `ยังไม่มีรายรับในเดือน ${monthLabel(month)}`
+              : kind === 'expense'
+                ? `ยังไม่มีรายจ่ายในเดือน ${monthLabel(month)}`
+                : `ยังไม่มีข้อมูลในเดือน ${monthLabel(month)}`}
           </p>
         )}
+
+        {/* Adding takings to outgoings would be a meaningless number, so the
+            unfiltered view foots with the month's profit instead of a sum. */}
+        {visible.length > 0 && (
+          <div className="flex justify-between items-center px-3 py-2.5 bg-admin-panel text-xs font-extrabold font-kanit">
+            <span className="text-neutral-600">
+              {kind === 'income' ? 'รวมรายรับ' : kind === 'expense' ? 'รวมรายจ่าย' : 'กำไรสุทธิทั้งเดือน'}
+            </span>
+            <span className={`font-mono ${kind === 'all' && totals.profit < 0 ? 'text-admin-expense' : 'text-neutral-800'}`}>
+              ฿{baht(kind === 'all' ? totals.profit : visible.reduce((n, r) => n + r.amount, 0))}
+            </span>
+          </div>
+        )}
       </div>
+
+      {/* Export always covers the WHOLE month shown above, never the filtered
+          view — the workbook is the month's book, not a screenshot of the list. */}
+      <button
+        onClick={handleExport}
+        className="w-full bg-admin-cta hover:bg-admin-cta-hover text-admin-cta-ink font-bold py-3 rounded-2xl transition flex items-center justify-center gap-2 font-kanit"
+      >
+        <FileSpreadsheet className="w-4 h-4" />
+        ส่งออกข้อมูล {monthLabel(month)}
+      </button>
     </div>
   );
 }

@@ -1,5 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Plus, Trash2, Search, ImageUp, X, Loader2, Pencil, Sun, Moon } from 'lucide-react';
+// `Menu` is the three-horizontal-lines icon; renamed on import so it can never
+// be misread as this screen's `menu` prop.
+import { Plus, Trash2, Search, ImageUp, X, Loader2, Pencil, Sun, Moon, Menu as GripLines } from 'lucide-react';
 import {
   fetchMenuOptions,
   uploadMenuImage,
@@ -8,6 +10,7 @@ import {
   updateMenuItem,
   createStockItem,
   setMenuTheme,
+  setMenuOrder,
   resolveImageUrl,
 } from '../api';
 import { shrinkImage } from '../image';
@@ -52,11 +55,22 @@ function themeFromShifts(day, night) {
   return 'none'; // shown in no storefront
 }
 
+// Pull one entry out of a list and drop it back in at another index.
+function moveItem(list, from, to) {
+  if (from === to) return list;
+  const next = [...list];
+  const [item] = next.splice(from, 1);
+  next.splice(to, 0, item);
+  return next;
+}
+
 const EMPTY_FORM = {
   category: '',
   type: 'เมนูหลัก',
   subcategory: '',
+  subcategoryEn: '',
   name: '',
+  nameEn: '',
   price: '',
   quantity: '',
   imageUrl: '',
@@ -140,11 +154,25 @@ function OwnerMenu({ menu, showToast }) {
   const [form, setForm] = useState(EMPTY_FORM);
   const [formTheme, setFormTheme] = useState('day');
   const [variants, setVariants] = useState([]);
-  const [options, setOptions] = useState({ categories: [], types: [], subcategories: [] });
+  // `pairs` is the (หมวดหมู่, หัวข้อ) combinations that exist in the database; the
+  // three flat lists are every distinct value of each field.
+  const [options, setOptions] = useState({ categories: [], types: [], subcategories: [], pairs: [] });
   const [imagePreview, setImagePreview] = useState('');
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
   const fileInputRef = useRef(null);
+
+  // --- Drag to reorder ------------------------------------------------------
+  // The order just sent to the server, kept so the list stays where the owner
+  // dropped it during the round trip instead of snapping back for a moment. Live
+  // drag state (which row is held, where it would land) is separate.
+  const [pendingOrder, setPendingOrder] = useState(null);
+  const [savingOrder, setSavingOrder] = useState(false);
+  const [drag, setDrag] = useState(null);
+  // The same drag, readable synchronously: pointermove fires far faster than
+  // React re-renders, and the drop handler needs the last target index, not
+  // whichever one React had committed when the handler was created.
+  const dragRef = useRef(null);
 
   // Dropdown values come from the database, so a heading added straight in
   // pgAdmin is offered here too. Fetched when the form opens rather than on
@@ -161,9 +189,63 @@ function OwnerMenu({ menu, showToast }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showForm]);
 
+  // --- หัวข้อ narrowed by หมวดหมู่ ------------------------------------------
+  // A หัวข้อ belongs to exactly one หมวดหมู่ — "ชา" only ever sits under เครื่องดื่ม,
+  // "เมนูราดข้าว" only under อาหาร. Offering the full list on every dish let a
+  // drink heading be filed on a food dish, which then sorted into the wrong
+  // storefront section. So once a หมวดหมู่ is picked, only its own headings are on
+  // the menu. No หมวดหมู่ yet → show them all; a brand-new หมวดหมู่ has none of its
+  // own yet, and the empty list is honest — "+ พิมพ์ค่าใหม่เอง…" is still there.
+  const subcategoryOptions = useMemo(() => {
+    const pairs = options.pairs || [];
+    if (!form.category || pairs.length === 0) return options.subcategories;
+    return [
+      ...new Set(pairs.filter((p) => p.category === form.category).map((p) => p.subcategory)),
+    ].sort((a, b) => a.localeCompare(b, 'th'));
+  }, [options, form.category]);
+
+  // Switching หมวดหมู่ must not leave the previous category's หัวข้อ behind. Only a
+  // heading the database knows is dropped: one the owner typed by hand is theirs
+  // to keep, and clearing it would wipe their text keystroke by keystroke while
+  // they type a new หมวดหมู่ (ComboBox reports every character).
+  const handleCategoryChange = (v) => {
+    setForm((f) => {
+      const pairs = options.pairs || [];
+      const known = pairs.some((p) => p.subcategory === f.subcategory);
+      const fitsHere = pairs.some((p) => p.category === v && p.subcategory === f.subcategory);
+      return { ...f, category: v, subcategory: !known || fitsHere ? f.subcategory : '' };
+    });
+  };
+
   // One combined list — day and night dishes together. Visibility per shift is
   // controlled by each row's sun/moon pill, not by a page-level shift switch.
-  const allMenu = useMemo(() => menu || [], [menu]);
+  //
+  // The menu arrives in the order the database holds it, which is the order the
+  // customer sees. While a reorder is in flight the just-dropped order is laid
+  // over it, so the row stays where it was dropped rather than jumping back for
+  // the second it takes the write and the SSE push to come round.
+  const allMenu = useMemo(() => {
+    const list = menu || [];
+    if (!pendingOrder) return list;
+    const rank = new Map(pendingOrder.map((id, i) => [id, i]));
+    // A dish the pending order never saw (added from another tab) sorts last
+    // rather than to the front, which is where the server would put it too.
+    return [...list].sort(
+      (a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity)
+    );
+  }, [menu, pendingOrder]);
+
+  // Drop the optimistic order once the real menu carries it — or once the menu
+  // has changed shape underneath it (a dish added or deleted elsewhere), where
+  // holding on would keep sorting by a list that no longer describes the menu.
+  useEffect(() => {
+    if (!pendingOrder) return;
+    const live = (menu || []).map((m) => m.id);
+    const arrived = live.length === pendingOrder.length && live.every((id, i) => id === pendingOrder[i]);
+    const wanted = new Set(pendingOrder);
+    const sameDishes = live.length === pendingOrder.length && live.every((id) => wanted.has(id));
+    if (arrived || !sameDishes) setPendingOrder(null);
+  }, [menu, pendingOrder]);
 
   const headings = useMemo(
     () => [...new Set(allMenu.map((m) => m.category).filter(Boolean))].sort(
@@ -183,6 +265,111 @@ function OwnerMenu({ menu, showToast }) {
 
   // "Hidden" = shown in no shift (theme 'none').
   const hiddenCount = allMenu.filter((m) => (m.theme || 'day') === 'none').length;
+
+  // The list as it should look right now: mid-drag the held row is already shown
+  // in the slot it would land in, so the gap opening up under the finger is the
+  // preview of the result.
+  const rows = drag ? moveItem(visible, drag.fromIndex, drag.toIndex) : visible;
+
+  // --- Drag to reorder ------------------------------------------------------
+  // Rows are a fixed height (a 44px thumbnail plus padding, and every label is
+  // truncated to one line), so how far the finger has travelled divided by that
+  // height is how many places the dish has moved. Pointer events rather than
+  // HTML5 drag-and-drop: this screen is used on a phone, where dragstart never
+  // fires at all.
+  const handleDragStart = (e, index, dish) => {
+    if (drag) return;
+    const row = e.currentTarget.closest('[data-dish-row]');
+    const height = row?.getBoundingClientRect().height || 64;
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    dragRef.current = {
+      pointerId: e.pointerId,
+      startY: e.clientY,
+      height,
+      fromIndex: index,
+      toIndex: index,
+      id: dish.id,
+      count: visible.length,
+      el: row, // written to directly while the finger moves — see below
+    };
+    setDrag({ id: dish.id, fromIndex: index, toIndex: index, dy: 0, height });
+  };
+
+  const handleDragMove = (e) => {
+    const d = dragRef.current;
+    if (!d || e.pointerId !== d.pointerId) return;
+    const dy = e.clientY - d.startY;
+    const steps = Math.round(dy / d.height);
+    const toIndex = Math.max(0, Math.min(d.count - 1, d.fromIndex + steps));
+
+    // The held row is nudged straight on the DOM node: pointermove fires many
+    // times a second, and re-rendering a 140-row list that often to move one row
+    // a few pixels stutters on a phone. React state is updated only when the row
+    // would actually change places — the one moment the OTHER rows have to move
+    // too — and it carries the same dy, so the re-render lands the row exactly
+    // where these writes had it.
+    if (d.el) d.el.style.transform = `translateY(${dy - (toIndex - d.fromIndex) * d.height}px)`;
+    if (toIndex !== d.toIndex) {
+      d.toIndex = toIndex;
+      setDrag((cur) => (cur ? { ...cur, dy, toIndex } : cur));
+    }
+  };
+
+  // Clear the inline transform the move handler wrote, or the row would keep the
+  // last offset once it is no longer the held row.
+  const endDrag = () => {
+    const d = dragRef.current;
+    if (d?.el) d.el.style.transform = '';
+    dragRef.current = null;
+    setDrag(null);
+    return d;
+  };
+
+  const handleDragCancel = () => { endDrag(); };
+
+  // Save one move. Shared by the drop and the keyboard shortcut so both write
+  // the menu the same way.
+  const commitMove = async (fromIndex, toIndex) => {
+    if (fromIndex === toIndex || toIndex < 0 || toIndex >= visible.length) return;
+
+    // Only the dishes on screen were dragged, so only the slots they occupy in
+    // the full menu are rewritten — the ones a filter or a search is hiding keep
+    // their own places. Reordering just `visible` and concatenating the rest
+    // would instead fling every hidden dish to the end of the menu.
+    const reordered = moveItem(visible, fromIndex, toIndex);
+    const onScreen = new Set(visible.map((m) => m.id));
+    const nextIds = allMenu.map((m) => m.id);
+    const slots = [];
+    nextIds.forEach((id, i) => { if (onScreen.has(id)) slots.push(i); });
+    reordered.forEach((dish, i) => { nextIds[slots[i]] = dish.id; });
+
+    setPendingOrder(nextIds);
+    setSavingOrder(true);
+    try {
+      await setMenuOrder(nextIds);
+      // No local menu write: the backend renumbers the rows and pushes the new
+      // menu over SSE, which is what every customer tab is reading.
+    } catch (err) {
+      setPendingOrder(null); // put the list back where the server still has it
+      showToast(`เรียงลำดับไม่สำเร็จ: ${err.message}`);
+    } finally {
+      setSavingOrder(false);
+    }
+  };
+
+  const handleDragEnd = () => {
+    const d = endDrag();
+    if (d) commitMove(d.fromIndex, d.toIndex);
+  };
+
+  // Arrow keys move the focused dish one place, so the order can be set without
+  // a pointer at all — and, on a phone, without a long steady drag.
+  const handleHandleKeyDown = (e, index) => {
+    const delta = e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0;
+    if (!delta) return;
+    e.preventDefault();
+    commitMove(index, index + delta);
+  };
 
   // --- Shift visibility (sun/moon pill) -------------------------------------
   // Toggle one shift (day or night) for a dish. The other shift is left as-is,
@@ -242,12 +429,20 @@ function OwnerMenu({ menu, showToast }) {
         category: spec.category || '',
         type: spec.type || 'เมนูหลัก',
         subcategory: spec.subcategory || '',
+        subcategoryEn: spec.subcategoryEn || '',
         name: spec.name || '',
+        nameEn: spec.nameEn || '',
         price: spec.price != null ? String(spec.price) : '',
         quantity: '',
         imageUrl: spec.imageUrl || '',
       });
-      setVariants((spec.variants || []).map((v) => ({ meat: v.meat, price: String(v.price) })));
+      setVariants(
+        (spec.variants || []).map((v) => ({
+          meat: v.meat,
+          meatEn: v.meatEn || '',
+          price: String(v.price),
+        }))
+      );
       setFormTheme(spec.theme || 'day');
       setImagePreview('');
       setEditingId(dish.id);
@@ -319,16 +514,25 @@ function OwnerMenu({ menu, showToast }) {
     }
 
     setSaving(true);
+    // The English fields have to be in every payload, not only when the owner
+    // typed one: saving a dish rewrites its rows from this object, so a field
+    // left out here is a translation deleted from the database.
     const payload = {
       category: form.category.trim(),
       type: form.type.trim() || 'เมนูหลัก',
       subcategory: form.subcategory.trim(),
+      subcategoryEn: form.subcategoryEn.trim(),
       name: form.name.trim(),
+      nameEn: form.nameEn.trim(),
       theme: formTheme,
       imageUrl: form.imageUrl,
       variants: filled.length
-        ? filled.map((v) => ({ meat: v.meat.trim(), price: Number(v.price) }))
-        : [{ meat: '-', price: Number(form.price) }],
+        ? filled.map((v) => ({
+            meat: v.meat.trim(),
+            meatEn: (v.meatEn || '').trim(),
+            price: Number(v.price),
+          }))
+        : [{ meat: '-', meatEn: '', price: Number(form.price) }],
     };
     try {
       if (editingId) {
@@ -434,7 +638,7 @@ function OwnerMenu({ menu, showToast }) {
             label="หมวดหมู่"
             value={form.category}
             options={options.categories}
-            onChange={(v) => setForm((f) => ({ ...f, category: v }))}
+            onChange={handleCategoryChange}
             placeholder="เช่น อาหาร, เครื่องดื่ม"
             required
           />
@@ -447,12 +651,29 @@ function OwnerMenu({ menu, showToast }) {
               onChange={(v) => setForm((f) => ({ ...f, type: v }))}
               placeholder="เช่น เมนูหลัก"
             />
+            {/* Narrowed to the chosen หมวดหมู่ — see subcategoryOptions above. */}
             <ComboBox
               label="หัวข้อ"
               value={form.subcategory}
-              options={options.subcategories}
+              options={subcategoryOptions}
               onChange={(v) => setForm((f) => ({ ...f, subcategory: v }))}
-              placeholder="เช่น เมนูราดข้าว"
+              placeholder={form.category ? `หัวข้อของ${form.category}` : 'เช่น เมนูราดข้าว'}
+            />
+          </div>
+
+          {/* หัวข้อ (EN) sits right under the หัวข้อ combo it translates. It is
+              stored per dish row, so changing it here retitles this dish only —
+              a heading shared with other dishes has to be retranslated on each. */}
+          <div>
+            <label className="block font-bold text-neutral-500 mb-1">
+              หัวข้อ (EN) <span className="font-medium text-neutral-400">— ไม่บังคับ</span>
+            </label>
+            <input
+              type="text"
+              value={form.subcategoryEn}
+              onChange={(e) => setForm((f) => ({ ...f, subcategoryEn: e.target.value }))}
+              placeholder="e.g. Rice Dishes"
+              className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
             />
           </div>
 
@@ -466,6 +687,22 @@ function OwnerMenu({ menu, showToast }) {
               required
               className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
             />
+          </div>
+
+          <div>
+            <label className="block font-bold text-neutral-500 mb-1">
+              ชื่อรายการ (EN) <span className="font-medium text-neutral-400">— ไม่บังคับ</span>
+            </label>
+            <input
+              type="text"
+              value={form.nameEn}
+              onChange={(e) => setForm((f) => ({ ...f, nameEn: e.target.value }))}
+              placeholder="e.g. Fried Fish Sauce Rice"
+              className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
+            />
+            <p className="text-[10px] text-neutral-400 font-medium mt-1">
+              เว้นว่างได้ — เมนูภาษาอังกฤษจะแสดงชื่อภาษาไทยแทน
+            </p>
           </div>
 
           {/* PRICE — only when the dish has no protein choices to price */}
@@ -511,7 +748,7 @@ function OwnerMenu({ menu, showToast }) {
               <label className="font-bold text-neutral-500">ตัวเลือกเนื้อสัตว์</label>
               <button
                 type="button"
-                onClick={() => setVariants((v) => [...v, { meat: '', price: form.price || '' }])}
+                onClick={() => setVariants((v) => [...v, { meat: '', meatEn: '', price: form.price || '' }])}
                 className="text-[10px] font-extrabold text-amber-700 hover:text-amber-900"
               >
                 + เพิ่มตัวเลือก
@@ -524,32 +761,45 @@ function OwnerMenu({ menu, showToast }) {
               </p>
             ) : (
               <>
+                {/* Two rows per option: Thai + price + delete, then its English
+                    name underneath. The EN box is indented so the pair reads as
+                    one option rather than two. */}
                 {variants.map((v, i) => (
-                  <div key={i} className="flex gap-1.5">
+                  <div key={i} className="space-y-1">
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        value={v.meat}
+                        onChange={(e) => updateVariant(i, { meat: e.target.value })}
+                        placeholder="เช่น หมู, ไก่, ทะเล"
+                        className="flex-1 border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
+                      />
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={v.price}
+                        onChange={(e) => updateVariant(i, { price: e.target.value })}
+                        placeholder="฿"
+                        className="w-20 border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono font-bold"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setVariants((prev) => prev.filter((_, idx) => idx !== i))}
+                        className="px-2.5 text-red-400 hover:text-red-600 hover:bg-red-500/10 rounded-xl transition"
+                        title="ลบตัวเลือก"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                     <input
                       type="text"
-                      value={v.meat}
-                      onChange={(e) => updateVariant(i, { meat: e.target.value })}
-                      placeholder="เช่น หมู, ไก่, ทะเล"
-                      className="flex-1 border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
+                      value={v.meatEn || ''}
+                      onChange={(e) => updateVariant(i, { meatEn: e.target.value })}
+                      placeholder={v.meat ? `English of "${v.meat}"` : 'e.g. Pork (EN — ไม่บังคับ)'}
+                      className="w-full ml-3 border rounded-xl p-2 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 text-[11px]"
+                      style={{ width: 'calc(100% - 0.75rem)' }}
                     />
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      value={v.price}
-                      onChange={(e) => updateVariant(i, { price: e.target.value })}
-                      placeholder="฿"
-                      className="w-20 border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono font-bold"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setVariants((prev) => prev.filter((_, idx) => idx !== i))}
-                      className="px-2.5 text-red-400 hover:text-red-600 hover:bg-red-500/10 rounded-xl transition"
-                      title="ลบตัวเลือก"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
                   </div>
                 ))}
                 <p className="text-[10px] text-neutral-400 font-medium">
@@ -662,16 +912,55 @@ function OwnerMenu({ menu, showToast }) {
       {/* LIST */}
       <div className="flex justify-between items-center pl-1 text-[10px] font-bold text-neutral-400">
         <span>{visible.length} รายการ</span>
-        {hiddenCount > 0 && <span className="text-red-500">ซ่อนอยู่ {hiddenCount} รายการ</span>}
+        <span className="flex items-center gap-2">
+          {savingOrder && (
+            <span className="flex items-center gap-1 text-neutral-500">
+              <Loader2 className="w-3 h-3 animate-spin" /> กำลังบันทึกลำดับ…
+            </span>
+          )}
+          {hiddenCount > 0 && <span className="text-red-500">ซ่อนอยู่ {hiddenCount} รายการ</span>}
+        </span>
       </div>
 
+      <p className="pl-1 text-[10px] text-neutral-400 font-medium">
+        ลากปุ่ม ☰ หน้ารูปเพื่อจัดลำดับ — ลำดับนี้คือลำดับที่ลูกค้าเห็นในหน้าสั่งอาหาร
+      </p>
+
       <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs divide-y divide-neutral-100">
-        {visible.length > 0 ? (
-          visible.map((dish) => {
+        {rows.length > 0 ? (
+          rows.map((dish, index) => {
             const busy = pending.has(dish.id);
             const shifts = shiftsFromTheme(dish.theme || 'day');
+            // The held row follows the finger: its travel less the distance the
+            // preview has already shifted it, so it sits under the fingertip
+            // whether or not the list has re-slotted it yet.
+            const held = drag?.id === dish.id;
+            const lift = held ? drag.dy - (drag.toIndex - drag.fromIndex) * drag.height : 0;
             return (
-              <div key={dish.id} className="flex items-center gap-2.5 px-3 py-2.5 font-thai">
+              <div
+                key={dish.id}
+                data-dish-row
+                className={`flex items-center gap-2.5 px-3 py-2.5 font-thai bg-admin-card ${held ? 'relative z-10 shadow-lg rounded-xl' : ''}`}
+                style={held ? { transform: `translateY(${lift}px)`, touchAction: 'none' } : undefined}
+              >
+                {/* DRAG HANDLE — ลากเพื่อจัดลำดับ */}
+                <button
+                  type="button"
+                  onPointerDown={(e) => handleDragStart(e, index, dish)}
+                  onPointerMove={handleDragMove}
+                  onPointerUp={handleDragEnd}
+                  onPointerCancel={handleDragCancel}
+                  onKeyDown={(e) => handleHandleKeyDown(e, index)}
+                  aria-label={`จัดลำดับ ${dish.name}`}
+                  title="ลากขึ้น-ลงเพื่อจัดลำดับเมนู (หรือกดปุ่มลูกศรขึ้น/ลง)"
+                  // touch-action:none, or the browser claims the gesture as a
+                  // page scroll and the row never moves on a phone.
+                  style={{ touchAction: 'none' }}
+                  className={`-ml-1 p-1 flex-shrink-0 rounded-lg text-neutral-300 hover:text-neutral-500 hover:bg-neutral-100 transition cursor-grab active:cursor-grabbing ${held ? 'text-neutral-500 bg-neutral-100' : ''}`}
+                >
+                  <GripLines className="w-4 h-4" />
+                </button>
+
                 <div className="w-11 h-11 rounded-xl bg-neutral-100 flex items-center justify-center text-xl overflow-hidden flex-shrink-0">
                   {dish.image
                     ? <img src={resolveImageUrl(dish.image)} alt="" loading="lazy" className="w-full h-full object-cover" />

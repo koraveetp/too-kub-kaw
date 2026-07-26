@@ -96,7 +96,10 @@ export const ITEM_STATUS_COLORS = {
   in_kitchen: 'bg-[#DCE9F7] text-[#2F5D8A]',
   in_progress: 'bg-[#E6DAF7] text-[#5B3A9A]',
   completed: 'bg-[#DCEFE0] text-[#2C6E49]',
-  served: 'bg-[#DFF0E3] text-[#2C6E49]',
+  // Light brown, NOT another green: 'completed' (เสร็จแล้ว, off the kitchen board)
+  // and 'served' (เสิร์ฟแล้ว, on the table) are two different things, and the two
+  // near-identical greens they used to share made the board unreadable at a glance.
+  served: 'bg-[#EADBC8] text-[#6B4A2B]',
 };
 
 // Is this order line a drink? Drinks are filtered off the kitchen board and

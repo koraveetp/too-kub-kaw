@@ -40,6 +40,8 @@ import {
   fetchMenuOptions,
   setDishAvailability,
   setDishTheme,
+  setDishOrder,
+  ensureMenuOrderColumn,
   insertMenuItem,
   getDishForEdit,
   updateMenuItem,
@@ -110,9 +112,17 @@ function distanceMeters(lat1, lng1, lat2, lng2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-// Local calendar date (YYYY-MM-DD) for "one in + one out per day".
-function localDateKey(ts = Date.now()) {
+// The WORKING day (YYYY-MM-DD) a moment belongs to, for "one in + one out per
+// day". A shop day runs 06:00 today → 06:00 tomorrow, not midnight to midnight:
+// the night side closes after midnight, so someone who clocks in at 20:00 and
+// out at 01:30 must land on a single record instead of two half-days. Shifting
+// the clock back by the start hour reduces that to a plain local date.
+// Mirrors workdayKey() in frontend/src/shift.js — keep the two in step.
+const WORKDAY_START_HOUR = 6;
+
+function workdayKey(ts = Date.now()) {
   const d = new Date(ts);
+  d.setHours(d.getHours() - WORKDAY_START_HOUR);
   const pad = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
@@ -697,8 +707,8 @@ app.put('/api/:resource', (req, res) => {
 // Staff clock-in / clock-out. Auth required (the record is tied to the logged-in
 // account); the browser sends its GPS position and the action only succeeds
 // inside the shop's geofence. The timestamp recorded is the server's clock at
-// the moment of the request. First call of the day = clock-in, second = clock-out,
-// anything after that is rejected.
+// the moment of the request. First call of the WORKING day (06:00 → 06:00, see
+// workdayKey) = clock-in, second = clock-out, anything after that is rejected.
 app.post('/api/timeclock/clock', requireAuth, (req, res) => {
   const lat = Number(req.body?.lat);
   const lng = Number(req.body?.lng);
@@ -717,7 +727,7 @@ app.post('/api/timeclock/clock', requireAuth, (req, res) => {
   const user = req.session.user;
   const account = (state.staff || []).find((s) => s.user === user);
   const now = Date.now();
-  const date = localDateKey(now);
+  const date = workdayKey(now);
 
   let record = state.timeclock.find((r) => r.user === user && r.date === date);
   let action;
@@ -805,6 +815,85 @@ app.post('/api/timeclock/payroll', requireOwner, (req, res) => {
   res.json({ ok: true });
 });
 
+// Owner edits ONE staff account: display name, username, password, daily wage.
+//
+// Deliberately not part of the whole-array PUT /api/staff. Two things that write
+// cannot do:
+//   * a rename has to carry the person's history with it — time-clock rows and
+//     payroll flags are keyed by username, so rewriting the staff array alone
+//     would leave a renamed member showing 0 days worked and an unpaid month
+//     that was already paid;
+//   * the served state strips password hashes, so the array a browser sends back
+//     can only keep a password by username match — the moment the username
+//     changes, the account reads as brand new and demands a new password.
+app.patch('/api/staff/:user', requireOwner, (req, res) => {
+  const current = String(req.params.user || '').trim();
+  const account = (state.staff || []).find((s) => s.user === current);
+  if (!account) return res.status(404).json({ error: 'ไม่พบพนักงานคนนี้' });
+
+  // Every field is optional: what is absent keeps its stored value, so the form
+  // can send only what the owner touched.
+  const nextUser = String(req.body?.user ?? current).trim();
+  const name = String(req.body?.name ?? account.name ?? '').trim();
+  const pass = req.body?.pass == null ? '' : String(req.body.pass);
+  const rawWage = req.body?.dailyWage;
+
+  if (!nextUser) return res.status(400).json({ error: 'ต้องระบุชื่อผู้ใช้' });
+  if (nextUser.length > 60) return res.status(400).json({ error: 'ชื่อผู้ใช้ยาวเกินไป' });
+  if (name.length > 100) return res.status(400).json({ error: 'ชื่อที่แสดงยาวเกินไป' });
+  if (nextUser !== current && (state.staff || []).some((s) => s.user === nextUser)) {
+    return res.status(409).json({ error: 'มีชื่อผู้ใช้งานนี้ในระบบแล้ว' });
+  }
+  // Renaming the account you are signed in as invalidates your own session on
+  // the very next request — sessions resolve to a staff record by username — so
+  // the owner would be locked out mid-edit with no obvious way back. Everything
+  // else about your own account is fine to change.
+  if (nextUser !== current && req.session.user === current) {
+    return res.status(400).json({
+      error: 'เปลี่ยนชื่อผู้ใช้ของบัญชีที่กำลังเข้าใช้งานอยู่ไม่ได้ (จะหลุดออกจากระบบทันที)',
+    });
+  }
+
+  let dailyWage = account.dailyWage || 0;
+  if (rawWage !== undefined && rawWage !== null && rawWage !== '') {
+    const n = Number(rawWage);
+    if (!Number.isFinite(n) || n < 0) {
+      return res.status(400).json({ error: 'ค่าแรงต้องเป็นตัวเลขตั้งแต่ 0 ขึ้นไป' });
+    }
+    dailyWage = n;
+  }
+
+  account.name = name || nextUser;
+  account.dailyWage = dailyWage;
+  if (pass) account.passHash = hashPassword(pass); // blank = keep the old one
+
+  if (nextUser !== current) {
+    account.user = nextUser;
+    for (const rec of state.timeclock || []) {
+      if (rec.user === current) rec.user = nextUser;
+    }
+    const movedPayroll = {};
+    for (const [key, value] of Object.entries(state.payroll || {})) {
+      const renamed = key.startsWith(`${current}__`)
+        ? `${nextUser}__${key.slice(current.length + 2)}`
+        : key;
+      movedPayroll[renamed] = value;
+    }
+    state.payroll = movedPayroll;
+  }
+  // The display name is copied onto each time-clock row when it is written, so
+  // refresh those too — otherwise the attendance tables keep the old name for
+  // every day already worked.
+  for (const rec of state.timeclock || []) {
+    if (rec.user === account.user) rec.name = account.name;
+  }
+
+  persist();
+  broadcast();
+  console.log(`[backend] Staff account "${current}" updated${nextUser !== current ? ` (renamed to "${nextUser}")` : ''}`);
+  res.json({ ok: true, user: account.user, name: account.name, dailyWage: account.dailyWage });
+});
+
 // Manually re-pull the menu from the database (e.g. after editing it directly
 // in pgAdmin). Staff-only. Broadcasts the refreshed menu to every open tab.
 app.post('/api/menu/refresh', requireAuth, async (_req, res) => {
@@ -860,6 +949,11 @@ function parseMenuItemBody(body) {
   const type = str(body?.type) || 'เมนูหลัก';
   const subcategory = str(body?.subcategory);
   const name = str(body?.name);
+  // Optional English companions. Blank is a valid answer — the ENG menu falls
+  // back to the Thai text — but they must round-trip, because updateMenuItem
+  // rewrites the dish's rows from exactly this spec.
+  const nameEn = str(body?.nameEn);
+  const subcategoryEn = str(body?.subcategoryEn);
   const rawTheme = str(body?.theme);
   const theme = ['day', 'night', 'both', 'none'].includes(rawTheme) ? rawTheme : 'day';
   const imageUrl = str(body?.imageUrl);
@@ -867,6 +961,8 @@ function parseMenuItemBody(body) {
   if (!name) return { error: 'กรุณากรอกชื่อรายการ' };
   if (!category) return { error: 'กรุณาเลือกหมวดหมู่' };
   if (name.length > 200) return { error: 'ชื่อรายการยาวเกินไป' };
+  if (nameEn.length > 200) return { error: 'ชื่อรายการ (EN) ยาวเกินไป' };
+  if (subcategoryEn.length > 200) return { error: 'หัวข้อ (EN) ยาวเกินไป' };
 
   // Only a path we issued, or an external link of the kind the imported data
   // already holds. Anything else (javascript:, data:) is refused rather than
@@ -885,11 +981,13 @@ function parseMenuItemBody(body) {
   const variants = [];
   for (const v of rawVariants) {
     const meat = str(v?.meat) || '-';
+    const meatEn = str(v?.meatEn);
     const price = Number(v?.price);
     if (!Number.isFinite(price) || price < 0) {
       return { error: `ราคาของ "${meat === '-' ? name : meat}" ต้องเป็นตัวเลขตั้งแต่ 0 ขึ้นไป` };
     }
-    variants.push({ meat, price: Math.round(price) });
+    if (meatEn.length > 200) return { error: `ตัวเลือก "${meat}" (EN) ยาวเกินไป` };
+    variants.push({ meat, meatEn, price: Math.round(price) });
   }
   if (variants.length > 20) return { error: 'ตัวเลือกเนื้อสัตว์มากเกินไป' };
 
@@ -898,7 +996,9 @@ function parseMenuItemBody(body) {
     return { error: 'มีตัวเลือกเนื้อสัตว์ซ้ำกัน' };
   }
 
-  return { value: { category, type, subcategory, name, theme, imageUrl, variants } };
+  return {
+    value: { category, type, subcategory, subcategoryEn, name, nameEn, theme, imageUrl, variants },
+  };
 }
 
 // Add a dish. One row goes in per protein option, all sharing the image, which
@@ -997,6 +1097,32 @@ app.patch('/api/menu/items/theme', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[backend] Could not change theme:', err.message);
     res.status(502).json({ error: err.message || 'เปลี่ยนกะที่แสดงไม่สำเร็จ' });
+  }
+});
+
+// Rearrange the menu. The body is the dish ids in their new order, exactly as
+// the owner dragged them in จัดการเมนู; the customer menu renders the array in
+// the order it arrives, so this is what the diner ends up seeing.
+app.patch('/api/menu/order', requireAuth, async (req, res) => {
+  const raw = req.body?.ids;
+  if (!Array.isArray(raw) || !raw.length) {
+    return res.status(400).json({ error: 'ต้องระบุลำดับเมนู' });
+  }
+  // A menu of a few hundred dishes is normal; ten thousand ids is not a drag,
+  // it is a malformed (or hostile) body, and the UNNEST behind it is unbounded.
+  if (raw.length > 5000) return res.status(400).json({ error: 'รายการเมนูมากเกินไป' });
+  const ids = raw.map((id) => String(id || '').trim()).filter(Boolean);
+  if (!ids.length) return res.status(400).json({ error: 'ต้องระบุลำดับเมนู' });
+
+  try {
+    const updated = await setDishOrder(ids);
+    if (!updated) return res.status(404).json({ error: 'ไม่พบเมนูที่จะเรียงลำดับ' });
+    await refreshMenuAndBroadcast();
+    console.log(`[backend] Menu reordered (${updated} row(s))`);
+    res.json({ ok: true, rows: updated });
+  } catch (err) {
+    console.error('[backend] Could not reorder menu:', err.message);
+    res.status(502).json({ error: err.message || 'เรียงลำดับเมนูไม่สำเร็จ' });
   }
 });
 
@@ -1142,7 +1268,10 @@ const server = app.listen(PORT, () => {
   // Sync the menu from PostgreSQL on startup. If the DB is unreachable the app
   // keeps running on the last-known (seed/persisted) menu.
   if (HAS_DB) {
-    syncMenuFromDb()
+    // Add the sort_order column first, so the very first sync already reads the
+    // menu in the owner's order rather than needing a second pass.
+    ensureMenuOrderColumn()
+      .then(syncMenuFromDb)
       .then(({ count }) => {
         broadcast();
         console.log(`[backend] Menu synced from PostgreSQL (${count} items)`);

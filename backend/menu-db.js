@@ -41,6 +41,10 @@ const MISSING_COLUMN_HINT = {
     'menu_items has no "available" column — every dish will show as on sale ' +
     'and the owner\'s on/off switch cannot be saved. Add it with:  ' +
     'ALTER TABLE menu_items ADD COLUMN available BOOLEAN NOT NULL DEFAULT true;',
+  sort_order:
+    'menu_items has no "sort_order" column — dishes fall back to insertion ' +
+    'order and the owner cannot rearrange the customer menu. Add it with:  ' +
+    'ALTER TABLE menu_items ADD COLUMN sort_order INTEGER;',
 };
 
 async function hasColumn(name) {
@@ -84,6 +88,19 @@ async function fetchMenuRows() {
   const meatEnSelect = (await hasColumn('meat_en'))
     ? `COALESCE(meat_en, '')` : `''`;
 
+  // The owner's hand-set order. It rides along as `__sortOrder` (like __rowId,
+  // an internal field the transforms ignore) purely so an edit can put the dish
+  // back in the same place — see updateMenuItem, which deletes and re-inserts.
+  const hasSort = await hasColumn('sort_order');
+  const sortSelect = hasSort ? 'sort_order' : 'NULL::int';
+  // Rows the owner has never arranged (sort_order NULL) sort after the ones they
+  // have, newest-dish-last, rather than jumping to the top of the menu. Ordering
+  // by id second keeps a dish's protein rows together and in their entered
+  // order, which is what makes the first option the default.
+  const orderBy = hasSort
+    ? 'ORDER BY COALESCE(sort_order, 2147483647), id'
+    : 'ORDER BY id';
+
   const { rows } = await getPool().query(`
     SELECT id          AS "__rowId",
            category    AS "หมวดหมู่",
@@ -97,9 +114,10 @@ async function fetchMenuRows() {
            ${nameEnSelect} AS "ชื่อรายการ(en)",
            ${meatEnSelect} AS "เนื้อสัตว์(en)",
            ${themeSelect},
-           ${availableSelect}
+           ${availableSelect},
+           ${sortSelect} AS "__sortOrder"
     FROM menu_items
-    ORDER BY id
+    ${orderBy}
   `);
   return rows;
 }
@@ -139,13 +157,31 @@ export async function fetchMenuOptions() {
   const { rows } = await getPool().query(`
     SELECT DISTINCT category, type, subcategory FROM menu_items
   `);
+  const clean = (v) => (v || '').trim();
   const collect = (key) =>
-    [...new Set(rows.map((r) => (r[key] || '').trim()).filter(Boolean))]
+    [...new Set(rows.map((r) => clean(r[key])).filter(Boolean))]
       .sort((a, b) => a.localeCompare(b, 'th'));
+
+  // The (หมวดหมู่, หัวข้อ) pairs that actually exist. A หัวข้อ is not free-standing —
+  // "ชา" only ever belongs under เครื่องดื่ม — so the form needs the pairing to
+  // stop a drink heading being offered on a food dish (which would then sort into
+  // the wrong storefront section). Rows with no หัวข้อ contribute nothing here.
+  // Re-deduped after trimming, since SELECT DISTINCT ran on the untrimmed values.
+  const pairs = [
+    ...new Map(
+      rows
+        .map((r) => ({ category: clean(r.category), subcategory: clean(r.subcategory) }))
+        .filter((p) => p.category && p.subcategory)
+        // Keyed on both halves together, so a pair is deduped as a pair.
+        .map((p) => [`${p.category}\u0000${p.subcategory}`, p])
+    ).values(),
+  ];
+
   return {
     categories: collect('category'),
     types: collect('type'),
     subcategories: collect('subcategory'),
+    pairs,
   };
 }
 
@@ -205,31 +241,148 @@ export async function setDishTheme(dishId, theme) {
   return rowCount;
 }
 
+// Make sure the table can hold a hand-set order, adding the column if it is not
+// there yet. Unlike `theme` and `available` — which change what the app shows
+// and so are left to a deliberate ALTER — this one is purely additive: a NULL
+// sort_order means "not arranged yet", which is exactly how the menu already
+// behaves. Called once at startup; a database user without ALTER rights just
+// gets the warning and the SQL to run by hand, and the menu keeps working in
+// insertion order.
+export async function ensureMenuOrderColumn() {
+  try {
+    await getPool().query(`ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS sort_order INTEGER`);
+    columnCache.set('sort_order', true);
+    return true;
+  } catch (err) {
+    console.warn(
+      `[backend] Could not add menu_items.sort_order (${err.message}) — ` +
+      'the owner cannot rearrange the menu until it exists. Run:  ' +
+      'ALTER TABLE menu_items ADD COLUMN sort_order INTEGER;'
+    );
+    return false;
+  }
+}
+
+// Rearrange the menu. `orderedIds` is the dish ids in the order the owner
+// dragged them into; each dish's position is stamped onto every one of its rows,
+// so the ORDER BY in fetchMenuRows reproduces exactly that sequence and the
+// customer menu (which renders the array as it arrives, and takes its section
+// order from where each heading first appears) follows along.
+//
+// The whole menu is renumbered from 0 on every save rather than only the moved
+// dish: positions then stay dense and gap-free, so no amount of dragging can run
+// two dishes onto the same number and leave the tie broken by row id.
+//
+// Ids the client did not send — a dish added from another tab mid-drag — are not
+// dropped: they keep their current relative order at the end of the list.
+// Returns the number of rows renumbered.
+export async function setDishOrder(orderedIds) {
+  if (!(await hasColumn('sort_order'))) {
+    throw new Error(
+      'menu_items has no "sort_order" column — run: ALTER TABLE menu_items ' +
+      'ADD COLUMN sort_order INTEGER;'
+    );
+  }
+  const dishes = groupDishRows(await fetchMenuRows());
+  const byId = new Map(dishes.map((d) => [d.id, d]));
+
+  const seen = new Set();
+  const sequence = [];
+  for (const id of orderedIds) {
+    if (byId.has(id) && !seen.has(id)) { seen.add(id); sequence.push(id); }
+  }
+  for (const d of dishes) {
+    if (!seen.has(d.id)) sequence.push(d.id);
+  }
+
+  // Flattened (row id -> position) pairs, one entry per protein row.
+  const rowIds = [];
+  const positions = [];
+  sequence.forEach((id, position) => {
+    for (const row of byId.get(id).sourceRows) {
+      if (row.__rowId != null) { rowIds.push(row.__rowId); positions.push(position); }
+    }
+  });
+  if (!rowIds.length) return 0;
+
+  // One statement for the whole menu: 130-odd single-row UPDATEs would be 130
+  // round trips, and a partial failure would leave the order half-applied.
+  const { rowCount } = await getPool().query(
+    `UPDATE menu_items AS m
+        SET sort_order = v.position
+       FROM (SELECT UNNEST($1::int[]) AS id, UNNEST($2::int[]) AS position) AS v
+      WHERE m.id = v.id`,
+    [rowIds, positions]
+  );
+  return rowCount;
+}
+
+// Which of the optional English companion columns this table actually has.
+// A menu_items imported before they existed has none, and the app then falls
+// back to the Thai text everywhere.
+async function englishColumns() {
+  const [name, sub, meat] = await Promise.all([
+    hasColumn('name_en'),
+    hasColumn('subcategory_en'),
+    hasColumn('meat_en'),
+  ]);
+  return { name, sub, meat };
+}
+
+// Compose the INSERT for one variant row out of whichever optional columns
+// exist. Both writers go through this — without it an edit DELETEs the dish's
+// rows and re-inserts them with no translations, silently wiping the ENG menu
+// every time the owner touched a dish for any reason at all.
+//
+// `available` is null when the table has no such column; anything else is
+// written through as the dish's carried-over on/off state. `sortOrder` works the
+// same way, with one extra case: a brand-new dish passes null because it has no
+// place yet, and a NULL sort_order is exactly what puts it at the end of the
+// menu (see the ORDER BY in fetchMenuRows).
+function menuInsert(spec, v, en, available, sortOrder = null) {
+  const cols = ['category', 'type', 'subcategory', 'name', 'meat', 'price', 'image_url', 'theme'];
+  const values = [
+    spec.category, spec.type, spec.subcategory, spec.name,
+    v.meat, v.price, spec.imageUrl || null, spec.theme,
+  ];
+  // Empty string -> NULL: an untranslated field must read as "no translation"
+  // (so the app falls back to Thai), not as a blank English name.
+  const push = (col, val) => { cols.push(col); values.push(val || null); };
+  if (en.sub) push('subcategory_en', spec.subcategoryEn);
+  if (en.name) push('name_en', spec.nameEn);
+  if (en.meat) push('meat_en', v.meatEn);
+  if (available !== null) { cols.push('available'); values.push(available); }
+  if (sortOrder !== null) { cols.push('sort_order'); values.push(sortOrder); }
+
+  const params = values.map((_, i) => `$${i + 1}`).join(', ');
+  return {
+    sql: `INSERT INTO menu_items (${cols.join(', ')}) VALUES (${params})`,
+    values,
+  };
+}
+
 // Add a dish: one row per protein option, all sharing the same image.
 // `variants` is [{ meat, price }]; a dish with no protein choice passes a
 // single variant with meat '-' , matching how the imported data spells "none".
 //
 // The rows go in inside a transaction so a dish is never left half-inserted
 // (which would surface as a dish missing some of its options).
-export async function insertMenuItem({
-  category, type, subcategory, name, theme, imageUrl, variants,
-}) {
+export async function insertMenuItem(spec) {
   if (!(await hasColumn('theme'))) {
     throw new Error(
       'menu_items has no "theme" column — a new dish could not be filed under ' +
       'the day or night menu. Run: ALTER TABLE menu_items ADD COLUMN theme TEXT;'
     );
   }
+  const { variants } = spec;
+  const en = await englishColumns();
   const pool = getPool();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     for (const v of variants) {
-      await client.query(
-        `INSERT INTO menu_items (category, type, subcategory, name, meat, price, image_url, theme)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [category, type, subcategory, name, v.meat, v.price, imageUrl || null, theme]
-      );
+      const { sql, values } = menuInsert(spec, v, en, null);
+      await client.query(sql, values);
     }
     await client.query('COMMIT');
   } catch (err) {
@@ -254,14 +407,24 @@ export async function getDishForEdit(dishId) {
   // dish's own single price, matching how the create form treats them.
   const variants = dish.sourceRows
     .filter((r) => text(r['เนื้อสัตว์']))
-    .map((r) => ({ meat: r['เนื้อสัตว์'], price: toNumber(r['ราคา (บาท)'], 0) }));
+    .map((r) => ({
+      meat: r['เนื้อสัตว์'],
+      meatEn: text(r['เนื้อสัตว์(en)']),
+      price: toNumber(r['ราคา (บาท)'], 0),
+    }));
 
+  // The English companions travel with the dish. They have to: updateMenuItem
+  // rewrites the dish's rows from this spec, so anything the form does not send
+  // back is gone. One English name per dish, read off the first row — the same
+  // normalisation the Thai `name` already gets.
   return {
     id: dish.id,
     category: first['หมวดหมู่'] || '',
     type: first['ประเภท'] || '',
     subcategory: first['หัวข้อ'] || '',
+    subcategoryEn: text(first['หัวข้อ(en)']),
     name: dish.name,
+    nameEn: text(dish.nameEn) || text(first['ชื่อรายการ(en)']),
     theme: dish.theme,
     imageUrl: dish.image || '',
     price: variants.length ? null : toNumber(first['ราคา (บาท)'], 0),
@@ -275,9 +438,8 @@ export async function getDishForEdit(dishId) {
 // dish is never left half-rewritten. The on/off state is carried over from the
 // old rows (an edit is not a re-list), so a dish that was ปิดขาย stays that way.
 // Returns the number of rows written, or 0 if the id matched no dish.
-export async function updateMenuItem(dishId, {
-  category, type, subcategory, name, theme, imageUrl, variants,
-}) {
+export async function updateMenuItem(dishId, spec) {
+  const { variants } = spec;
   if (!(await hasColumn('theme'))) {
     throw new Error(
       'menu_items has no "theme" column — the dish could not be re-filed under ' +
@@ -290,6 +452,11 @@ export async function updateMenuItem(dishId, {
 
   // Preserve the current on/off state, but only if the column exists to hold it.
   const keepAvailable = (await hasColumn('available')) ? dish.available : null;
+  // Same for the owner's hand-set position: the rows are deleted and re-inserted,
+  // so without carrying it over every edit — a price fix, a new photo — would
+  // silently drop the dish to the bottom of the customer menu.
+  const keepSortOrder = dish.sourceRows[0]?.__sortOrder ?? null;
+  const en = await englishColumns();
 
   const pool = getPool();
   const client = await pool.connect();
@@ -299,19 +466,8 @@ export async function updateMenuItem(dishId, {
       await client.query(`DELETE FROM menu_items WHERE id = ANY($1::int[])`, [rowIds]);
     }
     for (const v of variants) {
-      if (keepAvailable === null) {
-        await client.query(
-          `INSERT INTO menu_items (category, type, subcategory, name, meat, price, image_url, theme)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [category, type, subcategory, name, v.meat, v.price, imageUrl || null, theme]
-        );
-      } else {
-        await client.query(
-          `INSERT INTO menu_items (category, type, subcategory, name, meat, price, image_url, theme, available)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-          [category, type, subcategory, name, v.meat, v.price, imageUrl || null, theme, keepAvailable]
-        );
-      }
+      const { sql, values } = menuInsert(spec, v, en, keepAvailable, keepSortOrder);
+      await client.query(sql, values);
     }
     await client.query('COMMIT');
   } catch (err) {

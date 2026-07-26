@@ -15,6 +15,7 @@ CREATE TABLE menu_items (
     image_url      TEXT,                        -- รูปภาพ
     theme          TEXT,                        -- 'day' | 'night' | 'both' | 'none' — กะที่เมนูแสดง ('none' = ซ่อนทุกที่)
     available      BOOLEAN NOT NULL DEFAULT true, -- เจ้าของเปิด/ปิดขายรายการนี้
+    sort_order     INTEGER,                     -- ลำดับที่เจ้าของลากจัดเอง (NULL = ยังไม่จัด, ไปต่อท้าย)
     subcategory_en TEXT,                        -- หัวข้อ (English, optional)
     name_en        TEXT,                        -- ชื่อรายการ (English, optional)
     meat_en        TEXT                         -- เนื้อสัตว์ (English, optional)
@@ -31,6 +32,9 @@ CREATE TABLE menu_items (
 --   ALTER TABLE menu_items DROP CONSTRAINT menu_items_theme_chk;
 --   ALTER TABLE menu_items ADD CONSTRAINT menu_items_theme_chk
 --     CHECK (theme = ANY (ARRAY['day','night','both','none']));
+-- ALTER TABLE menu_items ADD COLUMN sort_order INTEGER;
+-- (sort_order = ลำดับการแสดงในหน้าลูกค้า เจ้าของลากจัดได้ในหน้า "จัดการเมนู"
+--  แถวที่ยังเป็น NULL จะไปต่อท้ายเมนู จนกว่าจะลากจัดครั้งแรก)
 -- ALTER TABLE menu_items ADD COLUMN subcategory_en TEXT;
 -- ALTER TABLE menu_items ADD COLUMN name_en TEXT;
 -- ALTER TABLE menu_items ADD COLUMN meat_en TEXT;

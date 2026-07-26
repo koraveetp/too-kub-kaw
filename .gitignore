@@ -15,6 +15,12 @@ backend/backups/
 backend/uploads/
 *.local
 
+# Database dumps (pg_dump output). The schema lives in the *_schema.sql files;
+# a full dump is a snapshot to hand to someone, not source. Kept out so a fresh
+# `pg_dump` dropped in here is never swept up by `git add .`.
+restaurant_db.sql
+*_dump.sql
+
 # Logs
 *.log
 logs/

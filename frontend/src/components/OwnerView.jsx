@@ -1,26 +1,25 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Trash2,
   Settings as SettingsIcon,
   Wallet,
   LayoutDashboard,
-  FileSpreadsheet,
   UtensilsCrossed,
   CalendarClock,
+  UserCog,
   Users
 } from 'lucide-react';
 import OwnerDashboard from './OwnerDashboard';
 import OwnerSummary from './OwnerSummary';
 import OwnerMenu from './OwnerMenu';
-import AdminThemePanel from './AdminThemePanel';
-import { manualTimeclock, setPayrollStatus } from '../api';
+import TableQrCodes from './TableQrCodes';
+import { manualTimeclock, setPayrollStatus, updateStaffAccount } from '../api';
+import { workdayKey } from '../shift';
 import {
   SHOPS,
   EXPENSE_CATEGORIES,
-  shopLabel,
   todayKey,
-  formatThaiDate,
-  sumExpenses
+  formatThaiDate
 } from '../expenses';
 
 function OwnerView({
@@ -36,18 +35,21 @@ function OwnerView({
   timeclock,
   payroll
 }) {
-  const [subTab, setSubTab] = useState('dashboard'); // dashboard, report, expenses, timeclock, settings
+  const [subTab, setSubTab] = useState('dashboard'); // dashboard, menu, finance, timeclock, settings
 
   // --- EXPENSE ENTRY FORM ---
   const [expShop, setExpShop] = useState(SHOPS[0].id);
   const [expCategory, setExpCategory] = useState(EXPENSE_CATEGORIES[0]);
   const [expAmount, setExpAmount] = useState('');
   const [expNote, setExpNote] = useState('');
-  // The day a new expense is filed under (defaults to today, but the owner can
-  // back-date a receipt they forgot to enter).
+  // The day a new expense is filed under. Defaults to today; any date can be
+  // picked — back-dating a receipt found later, or forward-dating one that is
+  // paid ahead (rent, a deposit) so it lands in the month it belongs to.
   const [expDate, setExpDate] = useState(() => todayKey());
-  // Which day's history is on screen. Defaults to today.
-  const [historyDate, setHistoryDate] = useState(() => todayKey());
+  // Which month the ledger below the form is showing ('YYYY-MM'). It lives here,
+  // not in OwnerSummary, so filing an expense dated into another month can jump
+  // the table to it — otherwise the owner saves a receipt and sees nothing.
+  const [ledgerMonth, setLedgerMonth] = useState(() => todayKey().slice(0, 7));
 
   // Form states for staff accounts
   const [newStaffName, setNewStaffName] = useState('');
@@ -64,13 +66,21 @@ function OwnerView({
 
   // --- ประวัติเข้างาน (time clock history) ---
   // Which month the summary table shows (YYYY-MM) and which day the in/out
-  // detail table shows (YYYY-MM-DD). Both default to now/today.
-  const [tcMonth, setTcMonth] = useState(() => todayKey().slice(0, 7));
-  const [tcDate, setTcDate] = useState(() => todayKey());
+  // detail table shows (YYYY-MM-DD). Both default to the current WORKING day
+  // (06:00 → 06:00), which is how staff records are keyed — at 01:00 the owner
+  // must land on the shift still in progress, not on an empty new date.
+  const [tcMonth, setTcMonth] = useState(() => workdayKey().slice(0, 7));
+  const [tcDate, setTcDate] = useState(() => workdayKey());
 
   // Backfill modal (admin logs a forgotten clock). null = closed.
   const [backfill, setBackfill] = useState(null); // { user, date, inTime, outTime }
   const [savingClock, setSavingClock] = useState(false);
+
+  // Staff editor modal (ชื่อ / ชื่อผู้ใช้ / รหัสผ่าน / ค่าแรง). null = closed.
+  // `original` is the username the account is stored under, kept separate from
+  // the editable `user` field so a rename knows which record to patch.
+  const [staffEdit, setStaffEdit] = useState(null);
+  const [savingStaff, setSavingStaff] = useState(false);
 
   // Days worked (and wages owed) per staff member in the chosen month. A day
   // counts ONLY when it has BOTH a clock-in and a clock-out — hours don't
@@ -85,6 +95,9 @@ function OwnerView({
       const paid = payroll?.[`${s.user}__${tcMonth}`] === 'paid';
       return {
         user: s.user, name: s.name, position: s.position,
+        // Which shop the wage is an expense OF, when marking the month paid
+        // files it in the ledger.
+        shop: s.shop || 'day',
         dailyWage: s.dailyWage || 0, days, salary: days * (s.dailyWage || 0), paid,
       };
     });
@@ -110,11 +123,65 @@ function OwnerView({
   const combineDateTime = (date, time) =>
     time ? new Date(`${date}T${time}:00`).getTime() : null;
 
+  // --- เงินเดือนที่จ่ายแล้ว -> รายจ่าย ----------------------------------------
+  // Marking a month "จ่ายแล้ว" files the wage in the expense book by itself: the
+  // money left the till at that moment, and an owner who has to remember to type
+  // it in again is an owner whose รายรับ-รายจ่าย is quietly wrong.
+  //
+  // The id is derived from (user, month) rather than random, which is what makes
+  // the entry findable again: switching the status back to ยังไม่จ่าย pulls the
+  // same row out, and marking paid twice overwrites rather than double-files.
+  const payrollExpenseId = (user, month) => `exp_payroll_${user}_${month}`;
+
+  // Which day the wage is filed under. Paying the current month files it today;
+  // settling an earlier month files it on that month's last day, so the cost
+  // always lands in the month it was earned rather than the month it was
+  // remembered.
+  const payrollExpenseDate = (month) => {
+    const today = todayKey();
+    if (today.slice(0, 7) === month) return today;
+    const [y, m] = month.split('-').map(Number);
+    const lastDay = new Date(y, m, 0).getDate(); // day 0 of next month = last of this
+    return `${month}-${String(lastDay).padStart(2, '0')}`;
+  };
+
   const handleTogglePaid = async (row) => {
     const next = row.paid ? 'unpaid' : 'paid';
+    const id = payrollExpenseId(row.user, tcMonth);
     try {
       await setPayrollStatus({ user: row.user, month: tcMonth, status: next });
-      showToast(next === 'paid' ? `ทำเครื่องหมายจ่ายแล้ว: ${row.name}` : `ยกเลิกการจ่าย: ${row.name}`);
+
+      if (next === 'unpaid') {
+        const filed = (expenses || []).some((e) => e.id === id);
+        setExpenses((prev) => (prev || []).filter((e) => e.id !== id));
+        showToast(filed
+          ? `ยกเลิกการจ่าย: ${row.name} — ลบรายจ่ายที่บันทึกไว้แล้ว`
+          : `ยกเลิกการจ่าย: ${row.name}`);
+        return;
+      }
+
+      // Nothing earned, nothing to file — but the owner may still want the month
+      // flagged as settled (paid in cash, no recorded days), so the status stands
+      // and only the expense is skipped.
+      if (!(row.salary > 0)) {
+        showToast(`ทำเครื่องหมายจ่ายแล้ว: ${row.name} (ยังไม่มียอดให้บันทึกเป็นรายจ่าย)`);
+        return;
+      }
+
+      const entry = {
+        id,
+        date: payrollExpenseDate(tcMonth),
+        shop: row.shop,
+        category: 'ค่าแรงพนักงาน',
+        amount: row.salary,
+        note: `เงินเดือน ${row.name} เดือน ${tcMonth} (${row.days} วัน × ${row.dailyWage.toLocaleString()} บาท)`,
+        // Marks the row as filed by the payroll switch rather than typed by hand.
+        source: 'payroll',
+        createdAt: Date.now(),
+      };
+      setExpenses((prev) => [...(prev || []).filter((e) => e.id !== id), entry]);
+      setLedgerMonth(entry.date.slice(0, 7));
+      showToast(`จ่ายเงินเดือน ${row.name} ${row.salary.toLocaleString()} บาท — บันทึกลงรายจ่ายให้แล้ว`);
     } catch (err) {
       showToast(err.message || 'อัปเดตสถานะไม่สำเร็จ');
     }
@@ -122,6 +189,66 @@ function OwnerView({
 
   const openBackfill = () => {
     setBackfill({ user: staff?.[0]?.user || '', date: tcDate, inTime: '', outTime: '' });
+  };
+
+  // --- แก้ไขข้อมูลพนักงาน ------------------------------------------------------
+  // Load one account into the editor. The password box always opens EMPTY: the
+  // server never sends a password back (only a hash it keeps to itself), and a
+  // box pre-filled with dots would suggest the real one is sitting there to be
+  // read. Blank means "leave it as it is".
+  const loadStaffEdit = (user) => {
+    const s = (staff || []).find((a) => a.user === user);
+    if (!s) return null;
+    return {
+      original: s.user,
+      user: s.user,
+      name: s.name || '',
+      pass: '',
+      dailyWage: s.dailyWage ? String(s.dailyWage) : '',
+    };
+  };
+
+  const openStaffEdit = () => {
+    const first = staff?.[0]?.user;
+    if (!first) return showToast('ยังไม่มีบัญชีพนักงานในระบบ');
+    setStaffEdit(loadStaffEdit(first));
+  };
+
+  const handleSaveStaffEdit = async () => {
+    if (!staffEdit || savingStaff) return;
+    const user = staffEdit.user.trim();
+    const name = staffEdit.name.trim();
+    if (!user) return showToast('กรุณากรอกชื่อผู้ใช้');
+    if (staffEdit.dailyWage !== '' && !(Number(staffEdit.dailyWage) >= 0)) {
+      return showToast('ค่าแรงต้องเป็นตัวเลขตั้งแต่ 0 ขึ้นไป');
+    }
+    if (user !== staffEdit.original && (staff || []).some((s) => s.user === user)) {
+      return showToast('มีชื่อผู้ใช้งานนี้ในระบบแล้ว');
+    }
+
+    setSavingStaff(true);
+    try {
+      await updateStaffAccount(staffEdit.original, {
+        user,
+        name,
+        // Only sent when the owner typed one — an empty string would be read as
+        // a request to blank the password.
+        ...(staffEdit.pass ? { pass: staffEdit.pass } : {}),
+        dailyWage: staffEdit.dailyWage,
+      });
+      // No local staff write: the server rewrites the account (and moves the
+      // person's attendance history if the username changed), then pushes the
+      // new state to every open tab over SSE.
+      showToast(
+        `แก้ไขข้อมูล ${name || user} เรียบร้อย` +
+        (staffEdit.pass ? ' (เปลี่ยนรหัสผ่านแล้ว)' : '')
+      );
+      setStaffEdit(null);
+    } catch (err) {
+      showToast(err.message || 'แก้ไขข้อมูลพนักงานไม่สำเร็จ');
+    } finally {
+      setSavingStaff(false);
+    }
   };
 
   const handleSaveBackfill = async () => {
@@ -149,23 +276,6 @@ function OwnerView({
 
 
   // --- EXPENSE ACTIONS ---
-  // Every day that has at least one expense, newest first, so the date picker
-  // only ever offers days the owner actually recorded something on. Today is
-  // always included even when still empty, so a fresh entry has somewhere to land.
-  const expenseDates = useMemo(() => {
-    const days = new Set((expenses || []).map((e) => e.date).filter(Boolean));
-    days.add(todayKey());
-    return [...days].sort().reverse();
-  }, [expenses]);
-
-  const dayExpenses = useMemo(
-    () =>
-      (expenses || [])
-        .filter((e) => e.date === historyDate)
-        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)),
-    [expenses, historyDate]
-  );
-
   const handleAddExpense = (e) => {
     e.preventDefault();
     const amountNum = parseFloat(expAmount);
@@ -185,11 +295,13 @@ function OwnerView({
     };
 
     setExpenses((prev) => [...(prev || []), entry]);
-    // Jump the history to the day we just filed under, so the new row is visible.
-    setHistoryDate(entry.date);
+    // Jump the ledger to the month we just filed under, so the new row is visible.
+    setLedgerMonth(entry.date.slice(0, 7));
     setExpAmount('');
     setExpNote('');
-    showToast(`บันทึกรายจ่าย ${amountNum.toLocaleString()} บาท (${expCategory}) แล้ว`);
+    showToast(
+      `บันทึกรายจ่าย ${amountNum.toLocaleString()} บาท (${expCategory}) วันที่ ${formatThaiDate(entry.date)} แล้ว`
+    );
   };
 
   const handleDeleteExpense = (id, category, amount) => {
@@ -203,43 +315,6 @@ function OwnerView({
   const handleSaveSettings = (e) => {
     e.preventDefault();
     showToast('บันทึกข้อมูลการตั้งค่าเสร็จสมบูรณ์');
-  };
-
-  // --- BACK-OFFICE COLOURS ---
-  // There is no "save" button: a pick lands in `settings`, which is a shared
-  // resource, so the new colour persists and reaches every other open tab over
-  // SSE. Passing `null` drops the override and the built-in colour from
-  // index.css takes over again.
-  //
-  // The commit is debounced because <input type="color"> fires on every step of
-  // a drag — writing straight through would send a PUT and a broadcast to every
-  // connected tab for each intermediate colour. The draft below keeps the
-  // swatch responsive while the drag is in flight; the real write happens once
-  // the owner settles on a colour.
-  const [colorDraft, setColorDraft] = useState(null); // null = ใช้ค่าจาก settings
-  const colorTimer = useRef(null);
-  const activeColors = colorDraft ?? (settings.adminColors || {});
-
-  useEffect(() => () => clearTimeout(colorTimer.current), []);
-
-  const handleAdminColorChange = (key, value) => {
-    const next = { ...activeColors };
-    if (value == null) delete next[key];
-    else next[key] = value;
-
-    setColorDraft(next);
-    clearTimeout(colorTimer.current);
-    colorTimer.current = setTimeout(() => {
-      setSettings((prev) => ({ ...prev, adminColors: next }));
-      setColorDraft(null); // settings now holds it; fall back to the shared copy
-    }, 300);
-  };
-
-  const handleAdminColorReset = () => {
-    clearTimeout(colorTimer.current);
-    setColorDraft(null);
-    setSettings((prev) => ({ ...prev, adminColors: {} }));
-    showToast('คืนค่าสีหน้าหลังบ้านเป็นค่าเริ่มต้นแล้ว');
   };
 
   const handleAddStaffAccount = (e) => {
@@ -296,10 +371,10 @@ function OwnerView({
       case 'menu':
         return <OwnerMenu menu={menu} showToast={showToast} />;
 
-      case 'summary':
-        return <OwnerSummary orders={orders} expenses={expenses} showToast={showToast} />;
-
-      case 'expenses':
+      // การเงิน — the expense entry form plus the month summary that used to be
+      // its own สรุปยอด tab. One page: record an outgoing, then read it straight
+      // back against the month's takings in the ledger below.
+      case 'finance':
         return (
           <div className="space-y-4">
 
@@ -314,13 +389,29 @@ function OwnerView({
 
               <form onSubmit={handleAddExpense} className="space-y-3 text-xs font-thai">
                 <div>
-                  <label className="block font-bold text-neutral-500 mb-1">วันที่</label>
+                  <div className="flex justify-between items-baseline mb-1">
+                    <label htmlFor="exp-date" className="block font-bold text-neutral-500">วันที่</label>
+                    {/* Back to today in one tap after filing an old receipt. */}
+                    {expDate !== todayKey() && (
+                      <button
+                        type="button"
+                        onClick={() => setExpDate(todayKey())}
+                        className="text-[10px] font-bold text-amber-700 hover:underline"
+                      >
+                        กลับเป็นวันนี้
+                      </button>
+                    )}
+                  </div>
+                  {/* No `max`: an outgoing can be dated forward as well as back
+                      (rent or a deposit paid ahead belongs to the month it
+                      covers). text-neutral-800 because the field carries its own
+                      background — an inherited colour goes invisible at night. */}
                   <input
+                    id="exp-date"
                     type="date"
                     value={expDate}
-                    max={todayKey()}
                     onChange={e => setExpDate(e.target.value || todayKey())}
-                    className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
+                    className="w-full border rounded-xl p-2.5 bg-admin-field text-neutral-800 focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
                   />
                 </div>
 
@@ -385,67 +476,17 @@ function OwnerView({
               </form>
             </div>
 
-            {/* HISTORY */}
-            <div className="flex justify-between items-center gap-2 pl-1">
-              <h3 className="font-extrabold text-base font-kanit text-neutral-800 whitespace-nowrap">
-                ประวัติการใช้จ่าย
-              </h3>
-              <select
-                value={historyDate}
-                onChange={e => setHistoryDate(e.target.value)}
-                className="border rounded-full py-1.5 px-3 bg-admin-field text-[11px] font-bold text-neutral-600 focus:outline-none focus:ring-1 focus:ring-amber-500"
-              >
-                {expenseDates.map(d => (
-                  <option key={d} value={d}>{formatThaiDate(d)}</option>
-                ))}
-              </select>
-            </div>
-
-            <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs">
-              <div className="grid grid-cols-[1.4fr_1.2fr_0.8fr_1.4fr_auto] gap-2 px-3 py-2.5 bg-neutral-50 border-b text-[10px] font-extrabold text-neutral-500 font-kanit">
-                <span>ร้าน</span>
-                <span>ประเภท</span>
-                <span className="text-right">ราคา</span>
-                <span>หมายเหตุ</span>
-                <span className="w-6" />
-              </div>
-
-              {dayExpenses.length > 0 ? (
-                dayExpenses.map(e => (
-                  <div
-                    key={e.id}
-                    className="grid grid-cols-[1.4fr_1.2fr_0.8fr_1.4fr_auto] gap-2 px-3 py-2.5 border-b border-neutral-100 last:border-0 text-[11px] items-center font-thai"
-                  >
-                    <span className="font-bold text-neutral-800">{shopLabel(e.shop)}</span>
-                    <span className="text-neutral-600">{e.category}</span>
-                    <span className="text-right font-mono font-bold text-neutral-800">
-                      {e.amount.toLocaleString()}
-                    </span>
-                    <span className="text-neutral-500 truncate" title={e.note}>{e.note || '-'}</span>
-                    <button
-                      onClick={() => handleDeleteExpense(e.id, e.category, e.amount)}
-                      className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-500/10 rounded-lg transition"
-                      title="ลบรายการ"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))
-              ) : (
-                <p className="text-neutral-400 text-xs py-6 text-center font-medium">
-                  ยังไม่มีรายจ่ายของวันที่ {formatThaiDate(historyDate)}
-                </p>
-              )}
-
-              {dayExpenses.length > 0 && (
-                <div className="flex justify-between items-center px-3 py-2.5 bg-admin-panel text-xs font-extrabold font-kanit">
-                  <span className="text-neutral-600">รวมรายจ่ายวันนี้</span>
-                  <span className="font-mono text-neutral-800">
-                    ฿{sumExpenses(dayExpenses).toLocaleString()}
-                  </span>
-                </div>
-              )}
-            </div>
+            {/* MONTH SUMMARY + ประวัติรายรับ-รายจ่าย (was the สรุปยอด tab).
+                Deleting an outgoing still runs through this component, which is
+                the one that owns the expenses list. */}
+            <OwnerSummary
+              orders={orders}
+              expenses={expenses}
+              month={ledgerMonth}
+              setMonth={setLedgerMonth}
+              showToast={showToast}
+              onDeleteExpense={handleDeleteExpense}
+            />
           </div>
         );
 
@@ -453,14 +494,23 @@ function OwnerView({
         return (
           <div className="space-y-4 font-thai text-xs">
 
-            {/* BACKFILL — admin logs a forgotten clock */}
-            <button
-              onClick={openBackfill}
-              className="w-full flex items-center justify-center gap-1.5 border-2 border-dashed border-neutral-300 hover:border-amber-500 hover:bg-amber-500/10 text-neutral-600 hover:text-amber-700 font-bold py-2.5 rounded-xl transition text-xs"
-            >
-              <CalendarClock className="w-4 h-4" />
-              <span>ลงเวลาย้อนหลัง (กรณีพนักงานลืมลงเวลา)</span>
-            </button>
+            {/* ADMIN ACTIONS — backfill a forgotten clock, edit an account */}
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={openBackfill}
+                className="flex items-center justify-center gap-1.5 border-2 border-dashed border-neutral-300 hover:border-amber-500 hover:bg-amber-500/10 text-neutral-600 hover:text-amber-700 font-bold py-2.5 rounded-xl transition text-xs"
+              >
+                <CalendarClock className="w-4 h-4 flex-shrink-0" />
+                <span>ลงเวลาย้อนหลัง</span>
+              </button>
+              <button
+                onClick={openStaffEdit}
+                className="flex items-center justify-center gap-1.5 border-2 border-dashed border-neutral-300 hover:border-amber-500 hover:bg-amber-500/10 text-neutral-600 hover:text-amber-700 font-bold py-2.5 rounded-xl transition text-xs"
+              >
+                <UserCog className="w-4 h-4 flex-shrink-0" />
+                <span>แก้ไขข้อมูลพนักงาน</span>
+              </button>
+            </div>
 
             {/* TABLE 1 — MONTHLY SUMMARY: days, wage/day, salary, paid status */}
             <div className="bg-admin-card border rounded-2xl p-4 space-y-3 shadow-xs">
@@ -640,12 +690,10 @@ function OwnerView({
               </button>
             </form>
 
-            {/* BACK-OFFICE COLOUR PICKERS */}
-            <AdminThemePanel
-              colors={activeColors}
-              onChange={handleAdminColorChange}
-              onReset={handleAdminColorReset}
-            />
+            {/* TABLE QR CODES — moved here from the staff screen: printing table
+                stickers is a setup job for the owner, and it belongs beside the
+                จำนวนโต๊ะ setting that decides how many there are. */}
+            <TableQrCodes settings={settings} />
 
             {/* STAFF CRUD ACCOUNTS MANAGEMENT */}
             <div className="bg-admin-card border rounded-2xl p-4 space-y-4 shadow-xs font-thai text-xs">
@@ -773,11 +821,6 @@ function OwnerView({
 
   return (
     <div className="space-y-4 font-thai text-sm">
-      
-      {/* SECTION HEADER */}
-      <div className="bg-admin-head p-2.5 rounded-2xl">
-        <h2 className="font-extrabold text-base font-kanit">หลังบ้านผู้บริหารระบบ</h2>
-      </div>
 
       {/* SUB-TABS SELECTOR */}
       {/* Colours come from the --c-admin-* palette in index.css, so the whole
@@ -786,8 +829,9 @@ function OwnerView({
         {[
           { id: 'dashboard', label: 'ภาพรวม', icon: LayoutDashboard },
           { id: 'menu', label: 'จัดการเมนู', icon: UtensilsCrossed },
-          { id: 'expenses', label: 'รายจ่าย', icon: Wallet },
-          { id: 'summary', label: 'สรุปยอด', icon: FileSpreadsheet },
+          // การเงิน absorbed the old สรุปยอด tab — บันทึกรายจ่าย, สรุปยอดรายเดือน
+          // and ประวัติรายรับ-รายจ่าย all live behind this one wallet icon now.
+          { id: 'finance', label: 'การเงิน', icon: Wallet },
           { id: 'timeclock', label: 'ข้อมูลพนักงาน', icon: Users },
           { id: 'settings', label: 'ตั้งค่า', icon: SettingsIcon }
         ].map(tab => {
@@ -797,7 +841,7 @@ function OwnerView({
               key={tab.id}
               onClick={() => setSubTab(tab.id)}
               // Icon-only tabs: the label is kept as title/aria-label for
-              // tooltips + screen readers, but not rendered as text. With six
+              // tooltips + screen readers, but not rendered as text. With five
               // tabs sharing one row in the max-w-md shell, dropping the words
               // gives each icon room to breathe.
               title={tab.label}
@@ -879,6 +923,102 @@ function OwnerView({
               className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl transition text-sm disabled:opacity-50"
             >
               {savingClock ? 'กำลังบันทึก…' : 'บันทึกเวลา'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* STAFF EDIT MODAL — ชื่อ / ชื่อผู้ใช้ / รหัสผ่าน / ค่าแรง */}
+      {staffEdit && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end justify-center p-0" onClick={() => setStaffEdit(null)}>
+          <div className="bg-admin-card rounded-t-3xl max-w-md w-full p-6 space-y-4 text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100 font-thai" onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-between items-start">
+              <div>
+                <h3 className="text-base font-extrabold font-kanit">แก้ไขข้อมูลพนักงาน</h3>
+                <span className="text-[10px] text-neutral-400 font-medium">ชื่อที่แสดง ชื่อผู้ใช้ รหัสผ่าน และค่าแรงต่อวัน</span>
+              </div>
+              <button onClick={() => setStaffEdit(null)} className="p-1.5 rounded-full bg-neutral-100 hover:bg-neutral-200 text-neutral-500 transition">✕</button>
+            </div>
+
+            {/* Which account. Switching reloads the fields from the stored
+                record, so a half-typed edit is never carried onto someone else. */}
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">เลือกพนักงาน</label>
+              <select
+                value={staffEdit.original}
+                onChange={(e) => setStaffEdit(loadStaffEdit(e.target.value))}
+                className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold text-xs"
+              >
+                {(staff || []).map((s) => (
+                  <option key={s.user} value={s.user}>{s.name} ({s.user})</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">ชื่อที่แสดง</label>
+              <input
+                type="text"
+                value={staffEdit.name}
+                onChange={(e) => setStaffEdit({ ...staffEdit, name: e.target.value })}
+                placeholder="เช่น เจ๊แหม่ม"
+                className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold text-xs"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">ชื่อผู้ใช้ (เข้าระบบ)</label>
+              <input
+                type="text"
+                value={staffEdit.user}
+                onChange={(e) => setStaffEdit({ ...staffEdit, user: e.target.value })}
+                autoCapitalize="none"
+                autoCorrect="off"
+                className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold text-xs"
+              />
+              {staffEdit.user.trim() !== staffEdit.original && (
+                <p className="text-[10px] text-amber-700 font-bold">
+                  เปลี่ยนชื่อผู้ใช้ — ประวัติการลงเวลาและสถานะจ่ายเงินเดือนจะย้ายตามไปด้วย
+                  แต่ต้องใช้ชื่อใหม่นี้ในการเข้าสู่ระบบครั้งต่อไป
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">รหัสผ่านใหม่</label>
+              <input
+                type="text"
+                value={staffEdit.pass}
+                onChange={(e) => setStaffEdit({ ...staffEdit, pass: e.target.value })}
+                placeholder="เว้นว่างไว้ = ใช้รหัสผ่านเดิม"
+                className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono text-xs"
+              />
+              {/* The stored password is a one-way hash — nobody, including this
+                  screen, can read the current one back. Only replacing it is
+                  possible, and saying so beats an empty box that looks broken. */}
+              <p className="text-[10px] text-neutral-400">ระบบเก็บรหัสผ่านแบบเข้ารหัส จึงดูรหัสเดิมไม่ได้ ตั้งใหม่ได้อย่างเดียว</p>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">ค่าแรง (บาท/วัน)</label>
+              <input
+                type="number"
+                min="0"
+                step="any"
+                value={staffEdit.dailyWage}
+                onChange={(e) => setStaffEdit({ ...staffEdit, dailyWage: e.target.value })}
+                placeholder="เช่น 400"
+                className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono font-bold text-xs"
+              />
+              <p className="text-[10px] text-neutral-400">เงินเดือน = จำนวนวันที่มาทำงาน × ค่าแรงต่อวัน — แก้ค่านี้แล้วยอดในตารางจะคิดใหม่ทันที</p>
+            </div>
+
+            <button
+              onClick={handleSaveStaffEdit}
+              disabled={savingStaff}
+              className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl transition text-sm disabled:opacity-50"
+            >
+              {savingStaff ? 'กำลังบันทึก…' : 'บันทึกข้อมูลพนักงาน'}
             </button>
           </div>
         </div>

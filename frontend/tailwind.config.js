@@ -96,7 +96,6 @@ export default {
         // without touching any JSX.
         admin: {
           bar: 'var(--c-admin-bar)',
-          head: 'var(--c-admin-head)',
           // Surfaces inside the back-office/staff panels: the cards that used
           // to be a literal bg-white, the tinted form panels, and the input
           // backgrounds. Split from the storefront `card`/`well` tokens so the

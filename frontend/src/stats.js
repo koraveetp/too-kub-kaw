@@ -197,7 +197,64 @@ export function summaryRows(orders, expenses, monthKey) {
     .sort((a, b) => b.date.localeCompare(a.date) || a.shop.localeCompare(b.shop) || a.kind.localeCompare(b.kind));
 }
 
-// Month totals for the header strip.
+// --- Ledger rows (หน้าการเงิน) ----------------------------------------------
+// What the on-screen ประวัติรายรับ-รายจ่าย table lists. It differs from
+// summaryRows in ONE way that matters: an expense stays its own row, keeping the
+// note the owner typed and the id needed to delete it. Rolling outgoings up (as
+// the export sheet does) would throw both away and leave a row nobody can act on.
+// Income is still one line per day per shop — bills are never listed one by one.
+//
+// Shape: { key, date, shop, kind: 'income'|'expense', label, note, amount, id }
+// `id` is null on income rows, which is also what marks them as undeletable.
+export function ledgerRows(orders, expenses, monthKey) {
+  const rows = [];
+
+  const income = new Map(); // `${date}|${shop}` -> amount
+  (orders || [])
+    .filter((o) => o.status === 'paid')
+    .forEach((o) => {
+      const date = orderDateKey(o);
+      if (!date || !date.startsWith(monthKey)) return;
+      const k = `${date}|${orderShift(o)}`;
+      income.set(k, (income.get(k) || 0) + (Number(o.total) || 0));
+    });
+  income.forEach((amount, k) => {
+    const [date, shop] = k.split('|');
+    rows.push({
+      key: `income|${k}`,
+      date, shop, kind: 'income',
+      label: 'รายรับรวมประจำวัน', note: '', amount, id: null, createdAt: 0,
+    });
+  });
+
+  (expenses || []).forEach((e) => {
+    if (!e.date || !e.date.startsWith(monthKey)) return;
+    rows.push({
+      key: `expense|${e.id}`,
+      date: e.date,
+      shop: e.shop,
+      kind: 'expense',
+      label: e.category,
+      note: e.note || '',
+      amount: Number(e.amount) || 0,
+      id: e.id,
+      createdAt: e.createdAt || 0,
+    });
+  });
+
+  // Newest day first; within a day the takings lead, then the latest entry.
+  // (b.kind vs a.kind because 'expense' sorts before 'income' alphabetically.)
+  return rows.sort(
+    (a, b) =>
+      b.date.localeCompare(a.date) ||
+      b.kind.localeCompare(a.kind) ||
+      a.shop.localeCompare(b.shop) ||
+      (b.createdAt || 0) - (a.createdAt || 0)
+  );
+}
+
+// Month totals for the header strip. Works on either summaryRows or ledgerRows —
+// both carry { kind, amount } and both add up to the same month.
 export function summaryTotals(rows) {
   const income = rows.filter((r) => r.kind === 'income').reduce((n, r) => n + r.amount, 0);
   const expense = rows.filter((r) => r.kind === 'expense').reduce((n, r) => n + r.amount, 0);
