@@ -1,0 +1,13 @@
+# Never copy local machine state into the image — it gets rebuilt/mounted.
+node_modules
+**/node_modules
+frontend/dist
+backend/data.json
+backend/backups
+backend/uploads
+**/.env
+**/.env.*
+!**/.env.example
+.git
+*.log
+.DS_Store

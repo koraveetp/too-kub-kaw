@@ -23,7 +23,7 @@
 //     never re-batched — it groups strictly by its batchId.
 // ---------------------------------------------------------------------------
 
-import { normalizeItemStatus, KITCHEN_STATUSES } from './orders';
+import { normalizeItemStatus, KITCHEN_STATUSES, NON_KITCHEN_HEADINGS } from './orders';
 import { orderShift } from './shift';
 
 // A batch anchored at queue Q reaches up to Q + BATCH_WINDOW (so 3 consecutive
@@ -31,11 +31,6 @@ import { orderShift } from './shift';
 export const BATCH_WINDOW = 2;
 
 const CLOSED = new Set(['paid', 'cancelled']);
-
-// Headings (the menu's หัวข้อ, exposed as `category` on the built menu object)
-// that are served straight to the table and never cooked, so they stay off the
-// kitchen board like drinks do: cold towels, desserts and pre-packed snacks.
-const NON_KITCHEN_HEADINGS = new Set(['ผ้าเย็น', 'ของหวาน', 'ขนมหวาน', 'ขนมขบเคี้ยว']);
 
 // Menu names can fold in a protein — "ข้าวผัด (หมู)". Strip it to match a menu
 // row when an item is missing its stamped `group` (legacy orders).

@@ -25,7 +25,8 @@ import {
   ChefHat,
   Printer,
   RotateCcw,
-  Bell
+  Bell,
+  Search
 } from 'lucide-react';
 
 // Money on the printed slip: always two decimals with a thousands separator
@@ -62,6 +63,7 @@ function StaffView({
   const [stockItems, setStockItems] = useState([]);
   const [stockLoading, setStockLoading] = useState(false);
   const [stockError, setStockError] = useState('');
+  const [stockSearch, setStockSearch] = useState('');
   const [orderFilter, setOrderFilter] = useState('active'); // active, new, cooking, served, paid, all
   // The bill currently being sent to the printer. It is rendered into a hidden
   // #bill-print slip (80mm, styled for the Xprinter XP-80T) and fired straight
@@ -80,6 +82,7 @@ function StaffView({
   const [takeOrderCart, setTakeOrderCart] = useState([]);
   const [directCat, setDirectCat] = useState(null);
   const [selectedItem, setSelectedItem] = useState(null);
+  const [selectedOption, setSelectedOption] = useState(null); // chosen protein/size (เนื้อสัตว์)
   const [modalQty, setModalQty] = useState(1);
   const [modalNotes, setModalNotes] = useState('');
   const [selectedAddons, setSelectedAddons] = useState([]);
@@ -566,6 +569,8 @@ function StaffView({
     if (!item.available) return;
     setDetailMode(mode);
     setSelectedItem(item);
+    // Default to the first protein/size the same way the customer dialog does.
+    setSelectedOption(item.options && item.options.length ? item.options[0] : null);
     setModalQty(1);
     setModalNotes('');
     setSelectedAddons([]);
@@ -593,17 +598,26 @@ function StaffView({
       selectedAddons.reduce((sum, a) => sum + a.price, 0) + choicesCost(selectedChoices);
     const chosenNames = Object.values(selectedChoices).map(o => o.name);
 
+    // Protein/size (เนื้อสัตว์): its price becomes the base price, and its name is
+    // folded into the dish name — "ข้าวกระเพรา (หมูสับ)" — so the kitchen ticket
+    // and the bill both read the exact variant, matching the customer flow.
+    const basePrice = selectedOption ? selectedOption.price : selectedItem.price;
+    const lineName = selectedOption ? `${selectedItem.name} (${selectedOption.name})` : selectedItem.name;
+
     // When editing an existing bill, push straight into that bill. Tag the new
     // item with the bill's current last round so it stays grouped with it
     // rather than starting a stray divider.
     if (detailMode === 'editbill' && editingBill) {
       const lastRound = editingBill.items.reduce((m, it) => Math.max(m, itemRound(it)), 1);
       const items = [...editingBill.items, stampKitchenFields({
-        name: selectedItem.name,
+        name: lineName,
         menuId: selectedItem.id,
         group: selectedItem.group || 'food',
+        // Heading rides along so serve-direct lines (cold towels, desserts,
+        // snacks) get the 2-state flow like drinks — see isServeDirectItem.
+        category: selectedItem.category,
         qty: modalQty,
-        price: selectedItem.price,
+        price: basePrice,
         addonCost: addonCost,
         addOns: [...chosenNames, ...selectedAddons.map(a => a.name)],
         note: modalNotes,
@@ -622,9 +636,10 @@ function StaffView({
       id: selectedItem.id + '_' + Date.now().toString(36),
       menuId: selectedItem.id,
       group: selectedItem.group || 'food',
-      name: selectedItem.name,
-      basePrice: selectedItem.price,
-      price: selectedItem.price,
+      category: selectedItem.category,
+      name: lineName,
+      basePrice: basePrice,
+      price: basePrice,
       addonCost: addonCost,
       qty: modalQty,
       addons: [...chosenNames, ...selectedAddons.map(a => a.name)],
@@ -737,6 +752,7 @@ function StaffView({
         name: item.name,
         menuId: item.menuId,
         group: item.group || 'food',
+        category: item.category,
         qty: item.qty,
         price: item.basePrice,
         addonCost: item.addonCost,
@@ -1187,17 +1203,18 @@ function StaffView({
                 </select>
               </div>
 
-              {/* Direct Categories Selector */}
-              <div className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-none pt-1">
-                {categories.map(c => (
-                  <button
-                    key={c}
-                    onClick={() => setDirectCat(c)}
-                    className={`px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap transition border ${c === directCat ? 'bg-ctl border-ctl text-ctl-ink' : 'bg-neutral-100 border-neutral-200 text-neutral-500'}`}
-                  >
-                    {c}
-                  </button>
-                ))}
+              {/* Direct Categories Selector — a dropdown instead of a tab row so
+                  a long category list stays compact on the take-order screen. */}
+              <div className="pt-1">
+                <select
+                  value={directCat}
+                  onChange={e => setDirectCat(e.target.value)}
+                  className="w-full border rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-amber-500 bg-neutral-50 font-bold text-xs font-thai"
+                >
+                  {categories.map(c => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
               </div>
 
               {/* Quick Item List */}
@@ -1284,11 +1301,18 @@ function StaffView({
         // Warn when an item drops to this many units or fewer (stock_items has
         // no per-item threshold column, so one shared level is used).
         const LOW_STOCK = 5;
-        // Group the flat inventory by category for readable section headers.
-        const grouped = stockItems.reduce((acc, it) => {
-          (acc[it.category] = acc[it.category] || []).push(it);
-          return acc;
-        }, {});
+        // Search + sort. Fewest units first, so anything หมดแล้ว (0) / ใกล้หมด
+        // floats to the very top where it needs attention. The old per-category
+        // grouping is dropped in favour of that single ordering; each row keeps a
+        // category tag so the section is still visible.
+        const q = stockSearch.trim().toLowerCase();
+        const visibleStock = stockItems
+          .filter((it) =>
+            !q ||
+            it.name.toLowerCase().includes(q) ||
+            (it.category || '').toLowerCase().includes(q)
+          )
+          .sort((a, b) => (a.quantity - b.quantity) || a.name.localeCompare(b.name, 'th'));
         return (
           <div className="space-y-4">
             <div className="flex justify-between items-center">
@@ -1312,6 +1336,18 @@ function StaffView({
               </div>
             </div>
 
+            {/* SEARCH — filters by item name or category */}
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
+              <input
+                type="text"
+                value={stockSearch}
+                onChange={(e) => setStockSearch(e.target.value)}
+                placeholder="ค้นหารายการในคลัง"
+                className="w-full border rounded-xl py-2.5 pl-9 pr-3 bg-admin-field text-xs focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold font-thai"
+              />
+            </div>
+
             {stockLoading && (
               <div className="p-6 text-center text-xs text-neutral-400 font-thai">กำลังโหลดคลังวัตถุดิบ…</div>
             )}
@@ -1324,67 +1360,79 @@ function StaffView({
             {!stockLoading && !stockError && stockItems.length === 0 && (
               <div className="p-6 text-center text-xs text-neutral-400 font-thai">ยังไม่มีข้อมูลในตาราง stock_items</div>
             )}
+            {!stockLoading && !stockError && stockItems.length > 0 && visibleStock.length === 0 && (
+              <div className="p-6 text-center text-xs text-neutral-400 font-thai">ไม่พบรายการที่ค้นหา</div>
+            )}
 
-            {!stockLoading && !stockError && Object.keys(grouped).map((category) => (
-              <div key={category} className="space-y-1.5">
-                <h3 className="text-[11px] font-extrabold text-neutral-500 font-thai px-1">{category}</h3>
-                <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs divide-y divide-neutral-100">
-                  {grouped[category].map((item) => {
-                    const isLow = item.quantity <= LOW_STOCK;
-                    const img = resolveImageUrl(item.imageUrl);
-                    return (
-                      <div key={item.id} className="p-3.5 flex justify-between items-center text-xs font-thai">
-                        <div className="flex items-center gap-3 min-w-0">
-                          {img && (
-                            <img src={img} alt="" className="w-10 h-10 rounded-lg object-cover border shrink-0" loading="lazy" />
+            {!stockLoading && !stockError && visibleStock.length > 0 && (
+              <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs divide-y divide-neutral-100">
+                {visibleStock.map((item) => {
+                  const isOut = item.quantity <= 0;
+                  const isLow = !isOut && item.quantity <= LOW_STOCK;
+                  const img = resolveImageUrl(item.imageUrl);
+                  return (
+                    <div key={item.id} className="p-3.5 flex justify-between items-center text-xs font-thai">
+                      <div className="flex items-center gap-3 min-w-0">
+                        {img && (
+                          <img src={img} alt="" width={40} height={40} className="w-10 h-10 rounded-lg object-cover border shrink-0" loading="lazy" decoding="async" />
+                        )}
+                        <div className="min-w-0">
+                          <span className="font-bold text-neutral-800 truncate text-sm block">{item.name}</span>
+                          {item.category && (
+                            <span className="text-[10px] text-neutral-400 font-medium truncate block">{item.category}</span>
                           )}
-                          <span className="font-bold text-neutral-800 truncate text-sm">{item.name}</span>
-                        </div>
-
-                        <div className="flex items-center gap-3 shrink-0">
-                          {isLow && (
-                            <span className="flex items-center gap-1 text-[9px] bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-bold">
-                              <AlertTriangle className="w-3 h-3" />
-                              <span>ของใกล้หมด</span>
-                            </span>
-                          )}
-
-                          <div className="font-mono text-right">
-                            <span className={`text-base font-extrabold block ${isLow ? 'text-red-600' : 'text-neutral-800'}`}>
-                              {item.quantity}
-                            </span>
-                            <span className="text-[9px] text-neutral-400">หน่วยคงเหลือ</span>
-                          </div>
-
-                          {/* Per-item quick add (persists to stock_items) */}
-                          <div className="flex flex-col gap-1">
-                            <button
-                              onClick={() => adjustStockItemQty(item.id, 1)}
-                              className="bg-neutral-100 hover:bg-neutral-200 text-neutral-700 border font-bold px-2 py-0.5 rounded-lg text-[10px] transition"
-                            >
-                              +1
-                            </button>
-                            <button
-                              onClick={() => adjustStockItemQty(item.id, 10)}
-                              className="bg-ctl hover:bg-ctl-hover text-ctl-ink font-bold px-2 py-0.5 rounded-lg text-[10px] transition"
-                            >
-                              +10
-                            </button>
-                            <button
-                              onClick={() => adjustStockItemQty(item.id, -1)}
-                              disabled={item.quantity <= 0}
-                              className="bg-red-100 hover:bg-red-200 text-red-700 border border-red-200 font-bold px-2 py-0.5 rounded-lg text-[10px] transition disabled:opacity-40 disabled:cursor-not-allowed"
-                            >
-                              -1
-                            </button>
-                          </div>
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
+
+                      <div className="flex items-center gap-3 shrink-0">
+                        {isOut && (
+                          <span className="flex items-center gap-1 text-[9px] bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-bold">
+                            <AlertTriangle className="w-3 h-3" />
+                            <span>หมดแล้ว</span>
+                          </span>
+                        )}
+                        {isLow && (
+                          <span className="flex items-center gap-1 text-[9px] bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded-full font-bold">
+                            <AlertTriangle className="w-3 h-3" />
+                            <span>ใกล้หมด</span>
+                          </span>
+                        )}
+
+                        <div className="font-mono text-right">
+                          <span className={`text-base font-extrabold block ${isOut ? 'text-red-600' : isLow ? 'text-yellow-600' : 'text-neutral-800'}`}>
+                            {item.quantity}
+                          </span>
+                          <span className="text-[9px] text-neutral-400">หน่วยคงเหลือ</span>
+                        </div>
+
+                        {/* Per-item quick add (persists to stock_items) */}
+                        <div className="flex flex-col gap-1">
+                          <button
+                            onClick={() => adjustStockItemQty(item.id, 1)}
+                            className="bg-neutral-100 hover:bg-neutral-200 text-neutral-700 border font-bold px-2 py-0.5 rounded-lg text-[10px] transition"
+                          >
+                            +1
+                          </button>
+                          <button
+                            onClick={() => adjustStockItemQty(item.id, 10)}
+                            className="bg-ctl hover:bg-ctl-hover text-ctl-ink font-bold px-2 py-0.5 rounded-lg text-[10px] transition"
+                          >
+                            +10
+                          </button>
+                          <button
+                            onClick={() => adjustStockItemQty(item.id, -1)}
+                            disabled={item.quantity <= 0}
+                            className="bg-red-100 hover:bg-red-200 text-red-700 border border-red-200 font-bold px-2 py-0.5 rounded-lg text-[10px] transition disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            -1
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            ))}
+            )}
           </div>
         );
       }
@@ -1586,7 +1634,7 @@ function StaffView({
             <div className="flex justify-between items-start">
               <div>
                 <h3 className="text-base font-extrabold font-kanit">{selectedItem.name}</h3>
-                <span className="text-amber-600 font-extrabold font-mono text-base block mt-0.5">฿{selectedItem.price}</span>
+                <span className="text-amber-600 font-extrabold font-mono text-base block mt-0.5">฿{selectedOption ? selectedOption.price : selectedItem.price}</span>
                 <span className="text-[10px] text-neutral-400 font-medium">
                   {detailMode === 'editbill' ? `เพิ่มลงบิล โต๊ะ ${editingBill?.table}` : `รับออเดอร์ โต๊ะ ${targetTable}`}
                 </span>
@@ -1603,6 +1651,36 @@ function StaffView({
               <p className="text-xs text-neutral-400 bg-neutral-50 p-2.5 rounded-xl leading-normal font-medium font-thai">
                 {selectedItem.desc}
               </p>
+            )}
+
+            {/* PROTEIN / SIZE (เนื้อสัตว์) — one required pick, mirrors the customer
+                dialog. Absent for dishes sold at a single price. */}
+            {selectedItem.options && selectedItem.options.length > 0 && (
+              <div className="space-y-2">
+                <h4 className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400">
+                  {selectedItem.options.every(o => ['M', 'L', 'S'].includes(o.name)) ? 'เลือกขนาด' : 'เลือกเนื้อสัตว์'}
+                </h4>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {selectedItem.options.map(opt => (
+                    <label
+                      key={opt.name}
+                      className={`flex items-center justify-between p-2.5 border rounded-xl cursor-pointer transition text-xs font-thai ${selectedOption?.name === opt.name ? 'border-amber-500 bg-amber-500/10 ring-1 ring-amber-500' : 'border-neutral-150 hover:bg-neutral-50'}`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name="staff-option-choice"
+                          checked={selectedOption?.name === opt.name}
+                          onChange={() => setSelectedOption(opt)}
+                          className="w-4 h-4 text-amber-600 border-neutral-300 focus:ring-amber-500"
+                        />
+                        <span className="font-semibold text-neutral-700">{opt.name}</span>
+                      </div>
+                      <span className="text-neutral-500 font-bold font-mono">฿{opt.price}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
             )}
 
             {/* PICK-ONE GROUPS — ขนาด / ระดับความหวาน, straight from the sheet */}
@@ -1695,7 +1773,7 @@ function StaffView({
                 onClick={handleAddToCart}
                 className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl transition text-center text-xs"
               >
-                {detailMode === 'editbill' ? 'เพิ่มลงบิล' : 'ใส่บิล'} (฿{((selectedItem.price + selectedAddons.reduce((sum, a) => sum + a.price, 0) + choicesCost(selectedChoices)) * modalQty).toLocaleString()})
+                {detailMode === 'editbill' ? 'เพิ่มลงบิล' : 'ใส่บิล'} (฿{(((selectedOption ? selectedOption.price : selectedItem.price) + selectedAddons.reduce((sum, a) => sum + a.price, 0) + choicesCost(selectedChoices)) * modalQty).toLocaleString()})
               </button>
             </div>
 

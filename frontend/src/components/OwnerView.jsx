@@ -147,6 +147,17 @@ function OwnerView({
 
   const handleTogglePaid = async (row) => {
     const next = row.paid ? 'unpaid' : 'paid';
+
+    // Confirm both directions before touching anything: marking จ่ายแล้ว files a
+    // wage in the expense book, switching back to ยังไม่จ่าย pulls it out again —
+    // neither should fire on a stray tap.
+    const ok = next === 'paid'
+      ? confirm(row.salary > 0
+          ? `ยืนยันจ่ายเงินเดือน ${row.name} จำนวน ${row.salary.toLocaleString()} บาท (เดือน ${tcMonth}) แล้วใช่หรือไม่?`
+          : `ยืนยันทำเครื่องหมายว่าจ่ายเงินเดือน ${row.name} (เดือน ${tcMonth}) แล้วใช่หรือไม่?`)
+      : confirm(`ยืนยันเปลี่ยนสถานะ ${row.name} กลับเป็น "ยังไม่จ่าย" (เดือน ${tcMonth}) ใช่หรือไม่?`);
+    if (!ok) return;
+
     const id = payrollExpenseId(row.user, tcMonth);
     try {
       await setPayrollStatus({ user: row.user, month: tcMonth, status: next });
@@ -690,11 +701,6 @@ function OwnerView({
               </button>
             </form>
 
-            {/* TABLE QR CODES — moved here from the staff screen: printing table
-                stickers is a setup job for the owner, and it belongs beside the
-                จำนวนโต๊ะ setting that decides how many there are. */}
-            <TableQrCodes settings={settings} />
-
             {/* STAFF CRUD ACCOUNTS MANAGEMENT */}
             <div className="bg-admin-card border rounded-2xl p-4 space-y-4 shadow-xs font-thai text-xs">
               <h3 className="font-kanit font-extrabold text-xs text-neutral-400 uppercase tracking-wider">จัดการสิทธิ์พนักงาน</h3>
@@ -810,6 +816,10 @@ function OwnerView({
                 </div>
               </form>
             </div>
+
+            {/* TABLE QR CODES — printing table stickers is a setup job for the
+                owner; kept at the bottom of the settings page. */}
+            <TableQrCodes settings={settings} />
 
           </div>
         );

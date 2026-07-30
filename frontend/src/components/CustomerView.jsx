@@ -180,6 +180,10 @@ const filteredMenu = menu.filter(item => item.theme === theme || item.theme === 
       id: selectedItem.id + '_' + Date.now().toString(36),
       menuId: selectedItem.id,
       group: selectedItem.group || 'food',
+      // Section heading rides along so the order line keeps its 2-state
+      // (received -> served) lifecycle for serve-direct headings — cold towels,
+      // desserts, snacks — the same way drinks do. See isServeDirectItem.
+      category: selectedItem.category,
       name: itemName,
       nameEn: itemNameEn,
       option: selectedOption ? selectedOption.name : null,
@@ -261,6 +265,7 @@ const filteredMenu = menu.filter(item => item.theme === theme || item.theme === 
         nameEn: item.nameEn,
         menuId: item.menuId,
         group: item.group || 'food',
+        category: item.category,
         qty: item.qty,
         price: item.basePrice,
         addonCost: item.addonCost,
@@ -460,6 +465,12 @@ const filteredMenu = menu.filter(item => item.theme === theme || item.theme === 
                 >
                   🧾 {t('เช็กบิล / ชำระเงิน', 'Check out / Pay')}
                 </button>
+                <p className="text-[11px] text-ink-2 leading-snug text-center">
+                  {t(
+                    'สามารถกดแจ้งเช็กบิลผ่านหน้าจอเพื่อให้พนักงานนำใบเสร็จมาส่ง หรือหากต้องการให้พนักงานมาให้บริการที่โต๊ะ สามารถเรียกพนักงานได้ตามปกติเช่นกัน 😊',
+                    'Tap “Check out” on screen and staff will bring your receipt to the table — or call staff over anytime if you’d like service at your table 😊'
+                  )}
+                </p>
               </div>
             )
           )}
@@ -542,10 +553,24 @@ const filteredMenu = menu.filter(item => item.theme === theme || item.theme === 
                     onClick={() => handleOpenDetail(dish)}
                     className={`rounded-3xl p-3.5 flex items-center gap-3.5 transition duration-300 bg-card hover:bg-card-hover ${available ? 'cursor-pointer active:scale-[0.99]' : 'opacity-55'} ${isDay ? 'shadow-[0_6px_20px_-8px_rgba(90,46,20,0.28)] hover:shadow-[0_10px_26px_-8px_rgba(90,46,20,0.35)]' : 'border border-line shadow-[0_6px_20px_-10px_rgba(0,0,0,0.8)]'}`}
                   >
-                    <div className={`w-[88px] h-[88px] rounded-2xl flex-shrink-0 flex items-center justify-center text-4xl overflow-hidden ${isDay ? 'bg-gradient-to-b from-well to-well-2' : 'bg-well border border-line'}`}>
-                      {dish.image
-                        ? <img src={resolveImageUrl(dish.image)} alt="" loading="lazy" className="w-full h-full object-cover" />
-                        : <span>{dish.emoji || '🍽️'}</span>}
+                    {/* The emoji shows instantly as a placeholder; the photo is
+                        layered over it and fades in only once decoded, so a slow
+                        image never leaves a blank square. decoding="async" keeps
+                        the paint off the main thread while scrolling. */}
+                    <div className={`relative w-[88px] h-[88px] rounded-2xl flex-shrink-0 flex items-center justify-center text-4xl overflow-hidden ${isDay ? 'bg-gradient-to-b from-well to-well-2' : 'bg-well border border-line'}`}>
+                      <span>{dish.emoji || '🍽️'}</span>
+                      {dish.image && (
+                        <img
+                          src={resolveImageUrl(dish.image)}
+                          alt=""
+                          loading="lazy"
+                          decoding="async"
+                          width={88}
+                          height={88}
+                          onLoad={(e) => { e.currentTarget.style.opacity = '1'; }}
+                          className="absolute inset-0 w-full h-full object-cover opacity-0 transition-opacity duration-300"
+                        />
+                      )}
                     </div>
 
                     <div className="flex-1 min-w-0">

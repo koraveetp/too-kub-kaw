@@ -53,8 +53,15 @@ import { fetchStockItems, fetchStockAvailability, createStockItem, adjustStockIt
 import { hashPassword, verifyPassword, isHashed, signToken, verifyToken } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_FILE = path.join(__dirname, 'data.json');
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
+// Where runtime state lives. Defaults to the backend folder for local dev; in
+// production set DATA_DIR to a mounted persistent volume (e.g. /data) so
+// data.json, its backups and the uploaded menu photos survive a redeploy —
+// otherwise the container's disk is wiped on every deploy and staff accounts,
+// settings and photos are lost.
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+fs.mkdirSync(DATA_DIR, { recursive: true });
+const DATA_FILE = path.join(DATA_DIR, 'data.json');
+const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const PORT = process.env.PORT || 3001;
 
 // Menu photos land here. Created up front so the very first upload has
@@ -170,7 +177,7 @@ migrateStaffPasswords();
 // here before it is replaced, so a bad write (e.g. a stale second server
 // instance overwriting good data with an older in-memory copy) is always
 // recoverable: the previous good version is sitting in backend/backups.
-const BACKUP_DIR = path.join(__dirname, 'backups');
+const BACKUP_DIR = path.join(DATA_DIR, 'backups');
 const BACKUP_KEEP = 40; // most recent snapshots to retain; older ones are pruned
 fs.mkdirSync(BACKUP_DIR, { recursive: true });
 
@@ -967,7 +974,13 @@ function parseMenuItemBody(body) {
   // Only a path we issued, or an external link of the kind the imported data
   // already holds. Anything else (javascript:, data:) is refused rather than
   // stored and later rendered into an <img src>.
-  if (imageUrl && !/^\/uploads\/[A-Za-z0-9-]+\.(jpg|png|webp)$/.test(imageUrl)
+  //
+  // Two shapes are accepted: the UUID name multer generates (/uploads/<uuid>.jpg),
+  // and the bulk-imported menu photos that live in /uploads/Foods|Drinks/ under
+  // their original, human-readable names (spaces, parentheses, etc). The filename
+  // segment forbids "/" and "\", so neither shape can traverse out of /uploads.
+  if (imageUrl
+      && !/^\/uploads\/(?:Foods\/|Drinks\/)?[^/\\]+\.(?:jpg|png|webp)$/i.test(imageUrl)
       && !/^https?:\/\//i.test(imageUrl)) {
     return { error: 'ลิงก์รูปภาพไม่ถูกต้อง' };
   }
@@ -1221,6 +1234,23 @@ app.post('/api/stock-items/restock', requireAuth, async (req, res) => {
     res.status(502).json({ error: 'เติมสต็อกทั้งหมดไม่สำเร็จ' });
   }
 });
+
+// --- Serve the built frontend (production) ---------------------------------
+// In production this same server also serves the compiled React app, so the
+// whole thing is ONE origin: the frontend's relative /api and /uploads calls
+// (and the SSE stream) just work, with no CORS list or reverse proxy to set up.
+// In local dev this folder doesn't exist and Vite serves the app itself with
+// its own proxy (see frontend/vite.config.js), so this block is skipped.
+const CLIENT_DIR = path.join(__dirname, '..', 'frontend', 'dist');
+if (fs.existsSync(CLIENT_DIR)) {
+  app.use(express.static(CLIENT_DIR, { index: false, maxAge: '1h' }));
+  // SPA fallback: any non-API, non-upload GET returns index.html, so a deep
+  // link or a page refresh on a client-side route still loads the app.
+  app.get(/^\/(?!api\/|uploads\/).*/, (_req, res) => {
+    res.sendFile(path.join(CLIENT_DIR, 'index.html'));
+  });
+  console.log('[backend] Serving built frontend from frontend/dist');
+}
 
 // Central error handler: turn a rejected CORS origin or malformed JSON body
 // into a clean status code, and never leak a stack trace to the client.

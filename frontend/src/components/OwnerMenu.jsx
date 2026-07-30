@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 // `Menu` is the three-horizontal-lines icon; renamed on import so it can never
 // be misread as this screen's `menu` prop.
-import { Plus, Trash2, Search, ImageUp, X, Loader2, Pencil, Sun, Moon, Menu as GripLines } from 'lucide-react';
+import { Plus, Trash2, Search, ImageUp, X, Loader2, Pencil, Sun, Moon, Menu as GripLines, ChevronUp, ChevronDown } from 'lucide-react';
 import {
   fetchMenuOptions,
   uploadMenuImage,
@@ -29,10 +29,6 @@ import { shrinkImage } from '../image';
 // already live.
 // ---------------------------------------------------------------------------
 
-const THEMES = [
-  { id: 'day', label: 'เมนูกลางวัน' },
-  { id: 'night', label: 'เมนูกลางคืน' },
-];
 const FORM_THEMES = [
   { id: 'day', label: 'กลางวัน' },
   { id: 'night', label: 'กลางคืน' },
@@ -204,6 +200,32 @@ function OwnerMenu({ menu, showToast }) {
     ].sort((a, b) => a.localeCompare(b, 'th'));
   }, [options, form.category]);
 
+  // Thai -> English lookups mined from the live menu. The built menu carries a
+  // dish's หัวข้อ as `category`/`categoryEn` and each protein as an `options[]`
+  // entry ({ name, nameEn }), so every translation the owner has ever entered is
+  // already here — enough to auto-fill the EN field the moment a known หัวข้อ or
+  // เนื้อสัตว์ is chosen. First non-empty translation seen for a term wins.
+  const { meatOptions, meatEnByName, subcategoryEnByName } = useMemo(() => {
+    const meatEn = new Map();
+    const meats = new Set();
+    const subEn = new Map();
+    (menu || []).forEach((dish) => {
+      if (dish.category && dish.categoryEn && !subEn.has(dish.category)) {
+        subEn.set(dish.category, dish.categoryEn);
+      }
+      (dish.options || []).forEach((o) => {
+        if (!o.name || o.name === '-') return;
+        meats.add(o.name);
+        if (o.nameEn && !meatEn.has(o.name)) meatEn.set(o.name, o.nameEn);
+      });
+    });
+    return {
+      meatOptions: [...meats].sort((a, b) => a.localeCompare(b, 'th')),
+      meatEnByName: meatEn,
+      subcategoryEnByName: subEn,
+    };
+  }, [menu]);
+
   // Switching หมวดหมู่ must not leave the previous category's หัวข้อ behind. Only a
   // heading the database knows is dropped: one the owner typed by hand is theirs
   // to keep, and clearing it would wipe their text keystroke by keystroke while
@@ -247,10 +269,11 @@ function OwnerMenu({ menu, showToast }) {
     if (arrived || !sameDishes) setPendingOrder(null);
   }, [menu, pendingOrder]);
 
+  // In APPEARANCE order (not alphabetical): this is the order the customer sees
+  // the หัวข้อ sections in, and the order the ⬆⬇ buttons below rearrange — so the
+  // dropdown has to mirror it for a move to be visible.
   const headings = useMemo(
-    () => [...new Set(allMenu.map((m) => m.category).filter(Boolean))].sort(
-      (a, b) => a.localeCompare(b, 'th')
-    ),
+    () => [...new Set(allMenu.map((m) => m.category).filter(Boolean))],
     [allMenu]
   );
 
@@ -369,6 +392,45 @@ function OwnerMenu({ menu, showToast }) {
     if (!delta) return;
     e.preventDefault();
     commitMove(index, index + delta);
+  };
+
+  // --- Reorder whole หัวข้อ (category) sections -----------------------------
+  // The customer groups dishes under their category and shows those sections in
+  // the order each category first appears in the menu. So moving a หัวข้อ is
+  // moving its whole block of dishes past the neighbouring block: rebuild the
+  // flat id list category-by-category in the new order (dish order within each
+  // block is kept), then persist it the same way a dish drag does. dir is -1 to
+  // move the selected heading earlier, +1 to move it later.
+  const moveHeading = async (dir) => {
+    if (heading === 'all' || savingOrder) return;
+    const order = [...new Set(allMenu.map((m) => m.category).filter(Boolean))];
+    const idx = order.indexOf(heading);
+    const target = idx + dir;
+    if (idx < 0 || target < 0 || target >= order.length) return;
+    [order[idx], order[target]] = [order[target], order[idx]];
+
+    // Group dish ids by category, preserving each category's own dish order.
+    const byCat = new Map();
+    const noCat = []; // dishes with no category keep to the end, in place
+    allMenu.forEach((m) => {
+      if (!m.category) { noCat.push(m.id); return; }
+      if (!byCat.has(m.category)) byCat.set(m.category, []);
+      byCat.get(m.category).push(m.id);
+    });
+    const nextIds = [];
+    order.forEach((cat) => (byCat.get(cat) || []).forEach((id) => nextIds.push(id)));
+    noCat.forEach((id) => nextIds.push(id));
+
+    setPendingOrder(nextIds);
+    setSavingOrder(true);
+    try {
+      await setMenuOrder(nextIds);
+    } catch (err) {
+      setPendingOrder(null);
+      showToast(`เรียงลำดับหัวข้อไม่สำเร็จ: ${err.message}`);
+    } finally {
+      setSavingOrder(false);
+    }
   };
 
   // --- Shift visibility (sun/moon pill) -------------------------------------
@@ -621,7 +683,7 @@ function OwnerMenu({ menu, showToast }) {
           <div>
             <label className="block font-bold text-neutral-500 mb-1">กะที่ขาย</label>
             <div className="flex gap-1.5 bg-admin-card border rounded-xl p-1">
-              {(formMode === 'menu' ? FORM_THEMES : THEMES).map((t) => (
+              {FORM_THEMES.map((t) => (
                 <button
                   key={t.id}
                   type="button"
@@ -651,12 +713,17 @@ function OwnerMenu({ menu, showToast }) {
               onChange={(v) => setForm((f) => ({ ...f, type: v }))}
               placeholder="เช่น เมนูหลัก"
             />
-            {/* Narrowed to the chosen หมวดหมู่ — see subcategoryOptions above. */}
+            {/* Narrowed to the chosen หมวดหมู่ — see subcategoryOptions above.
+                Picking a known หัวข้อ auto-fills its English below; a new/unknown
+                one leaves whatever EN the owner typed untouched. */}
             <ComboBox
               label="หัวข้อ"
               value={form.subcategory}
               options={subcategoryOptions}
-              onChange={(v) => setForm((f) => ({ ...f, subcategory: v }))}
+              onChange={(v) => setForm((f) => {
+                const en = subcategoryEnByName.get(v);
+                return { ...f, subcategory: v, subcategoryEn: en != null ? en : f.subcategoryEn };
+              })}
               placeholder={form.category ? `หัวข้อของ${form.category}` : 'เช่น เมนูราดข้าว'}
             />
           </div>
@@ -767,13 +834,51 @@ function OwnerMenu({ menu, showToast }) {
                 {variants.map((v, i) => (
                   <div key={i} className="space-y-1">
                     <div className="flex gap-1.5">
-                      <input
-                        type="text"
-                        value={v.meat}
-                        onChange={(e) => updateVariant(i, { meat: e.target.value })}
-                        placeholder="เช่น หมู, ไก่, ทะเล"
-                        className="flex-1 border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
-                      />
+                      {/* Dropdown of เนื้อสัตว์ already used elsewhere, plus a
+                          "พิมพ์ใหม่เอง" escape hatch. Picking a known one fills its
+                          English below automatically; a brand-new one is typed. */}
+                      {(v.custom || (v.meat && !meatOptions.includes(v.meat))) ? (
+                        <div className="flex-1 min-w-0 flex gap-1">
+                          <input
+                            type="text"
+                            value={v.meat}
+                            onChange={(e) => updateVariant(i, { meat: e.target.value })}
+                            placeholder="เช่น หมู, ไก่, ทะเล"
+                            autoFocus
+                            className="flex-1 min-w-0 border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
+                          />
+                          {meatOptions.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => updateVariant(i, { custom: false, meat: '' })}
+                              className="px-2 rounded-xl border text-neutral-500 hover:bg-neutral-50 transition"
+                              title="เลือกจากรายการเดิม"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <select
+                          value={v.meat}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (val === '__custom__') {
+                              updateVariant(i, { custom: true, meat: '', meatEn: '' });
+                              return;
+                            }
+                            const en = meatEnByName.get(val);
+                            updateVariant(i, { meat: val, meatEn: en != null ? en : (v.meatEn || '') });
+                          }}
+                          className="flex-1 min-w-0 border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
+                        >
+                          <option value="">— เลือกเนื้อสัตว์ —</option>
+                          {meatOptions.map((m) => (
+                            <option key={m} value={m}>{m}</option>
+                          ))}
+                          <option value="__custom__">+ พิมพ์ใหม่เอง…</option>
+                        </select>
+                      )}
                       <input
                         type="number"
                         min="0"
@@ -896,16 +1001,44 @@ function OwnerMenu({ menu, showToast }) {
           />
         </div>
 
-        <div className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-none">
-          {['all', ...headings].map((h) => (
-            <button
-              key={h}
-              onClick={() => setHeading(h)}
-              className={`px-3 py-1 rounded-full text-[11px] font-bold whitespace-nowrap transition border ${h === heading ? 'bg-ctl border-ctl text-ctl-ink' : 'bg-neutral-100 border-neutral-200 text-neutral-500'}`}
-            >
-              {h === 'all' ? 'ทั้งหมด' : h}
-            </button>
-          ))}
+        {/* หัวข้อ filter — a dropdown (was a tab row), plus ⬆⬇ to reorder the
+            selected หัวข้อ. Moving it here shifts the whole section for the
+            customer; disabled when it is already at the top/bottom. */}
+        <div className="flex gap-1.5 items-center">
+          <select
+            value={heading}
+            onChange={(e) => setHeading(e.target.value)}
+            className="flex-1 min-w-0 border rounded-xl p-2.5 bg-admin-field text-xs focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold font-thai"
+          >
+            <option value="all">ทั้งหมด</option>
+            {headings.map((h) => (
+              <option key={h} value={h}>{h}</option>
+            ))}
+          </select>
+          {heading !== 'all' && (
+            <>
+              <button
+                type="button"
+                onClick={() => moveHeading(-1)}
+                disabled={savingOrder || headings.indexOf(heading) <= 0}
+                title="เลื่อนหัวข้อนี้ขึ้น (แสดงก่อน)"
+                aria-label="เลื่อนหัวข้อนี้ขึ้น"
+                className="p-2.5 rounded-xl border bg-admin-card text-neutral-600 hover:bg-neutral-50 transition disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                <ChevronUp className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => moveHeading(1)}
+                disabled={savingOrder || headings.indexOf(heading) >= headings.length - 1}
+                title="เลื่อนหัวข้อนี้ลง (แสดงทีหลัง)"
+                aria-label="เลื่อนหัวข้อนี้ลง"
+                className="p-2.5 rounded-xl border bg-admin-card text-neutral-600 hover:bg-neutral-50 transition disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                <ChevronDown className="w-4 h-4" />
+              </button>
+            </>
+          )}
         </div>
       </div>
 

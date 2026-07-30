@@ -26,10 +26,27 @@ export function isDrinkItem(item) {
 // สั่งกลับบ้าน or เป็นกับข้าว. Mirrors NON_KITCHEN_HEADINGS in kitchen.js.
 const NO_FOOD_ADDON_HEADINGS = new Set(['ผ้าเย็น', 'ของหวาน', 'ขนมหวาน', 'ขนมขบเคี้ยว']);
 
+// Headings for drinks that come pre-packaged from stock — bottled/canned, served
+// as-is (น้ำในสต็อก): water, soft drinks, beer, wine, spirits, ciders. Unlike a
+// made-to-order cup (ชา, กาแฟ, โกโก้, ชาผลไม้, น้ำผลไม้โซดา), a sealed can of โค้ก
+// or a bottle of เบียร์ can't be "50% sweet" or take ไข่มุก, so it offers no
+// sweetness level and no toppings. Its ขนาด choice (if any) is left alone.
+const PACKAGED_DRINK_HEADINGS = new Set([
+  'น้ำดื่ม', 'น้ำเปล่า', 'น้ำอัดลม',
+  'เบียร์', 'เบียร์คราฟต์', 'เบียร์ขาว',
+  'ไวน์', 'ไวน์คูลเลอร์', 'ไซเดอร์', 'บรั่นดี รัม',
+]);
+
+function isPackagedDrink(item) {
+  return PACKAGED_DRINK_HEADINGS.has(item?.category);
+}
+
 // Extras to offer for one dish. Food and drinks get different lists — a bowl of
 // ต้มข่าไก่ should not offer ไข่มุก, and a ชาเย็น should not offer ไข่ดาว.
 // The night bar keeps a single list of its own.
 export function addonsFor(addons, theme, item) {
+  // Packaged drinks (bottled/canned) take no extras (no toppings) in any storefront.
+  if (isPackagedDrink(item)) return [];
   if (theme === 'night') return addons?.night || [];
   if (isDrinkItem(item)) return addons?.drink || [];
   // Non-course food (desserts, snacks, cold towels) offers no plated-food extras.
@@ -41,7 +58,9 @@ export function addonsFor(addons, theme, item) {
 // ระดับความหวาน for drinks. Unlike addons these always have a value.
 export function choicesFor(choices, theme, item) {
   if (theme === 'night') return [];
-  return (isDrinkItem(item) ? choices?.drink : choices?.food) || [];
+  const list = (isDrinkItem(item) ? choices?.drink : choices?.food) || [];
+  // Packaged drinks drop the sweetness level; any other group (e.g. ขนาด) stays.
+  return isPackagedDrink(item) ? list.filter((g) => !String(g?.name).includes('หวาน')) : list;
 }
 
 // The default selection for every group: the sheet's first option.

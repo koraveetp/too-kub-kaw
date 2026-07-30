@@ -109,12 +109,26 @@ export function isDrinkItem(item) {
   return item?.group === 'drink';
 }
 
+// Section headings (the menu's หัวข้อ, exposed as `category`) whose items are
+// handed to the table as-is and never cooked — cold towels, desserts, pre-packed
+// snacks. Like drinks they skip the kitchen board and take the shorter
+// received -> served lifecycle. kitchen.js imports this same set from here.
+export const NON_KITCHEN_HEADINGS = new Set(['ผ้าเย็น', 'ของหวาน', 'ขนมหวาน', 'ขนมขบเคี้ยว']);
+
+// A line served straight to the table rather than cooked: every drink, plus the
+// non-kitchen headings above. These get the 2-state (received -> served) flow
+// and stay off the kitchen board. Reads the `category` stamped on the line at
+// order time; a legacy line without it falls back to the drink test alone.
+export function isServeDirectItem(item) {
+  return isDrinkItem(item) || NON_KITCHEN_HEADINGS.has(item?.category);
+}
+
 // Normalise any stored status onto the 5-state vocabulary, healing legacy rows
-// written before this feature ('new'/'cooking'). A legacy 'new' drink becomes
-// 'received'; a legacy 'new' food becomes 'in_kitchen' (its auto-placed state).
+// written before this feature ('new'/'cooking'). A legacy 'new' serve-direct
+// line becomes 'received'; a legacy 'new' cooked dish becomes 'in_kitchen'.
 export function normalizeItemStatus(item) {
   const s = item?.status;
-  if (!s || s === 'new') return isDrinkItem(item) ? 'received' : 'in_kitchen';
+  if (!s || s === 'new') return isServeDirectItem(item) ? 'received' : 'in_kitchen';
   if (s === 'cooking') return 'in_progress';
   return ITEM_STATUSES.includes(s) ? s : 'in_kitchen';
 }
@@ -128,7 +142,7 @@ export function itemStatus(item) {
 // tab. Drinks only ever go received -> served; food carries the full kitchen
 // chain so staff can still override the cook's board manually.
 export function statusFlowFor(item) {
-  return isDrinkItem(item) ? ['received', 'served'] : ITEM_STATUSES.filter(s => s !== 'received');
+  return isServeDirectItem(item) ? ['received', 'served'] : ITEM_STATUSES.filter(s => s !== 'received');
 }
 
 // Roll the per-item statuses up into the ONE bill-level status the boards,
@@ -149,10 +163,11 @@ export function deriveBillStatus(items) {
   return 'cooking';
 }
 
-// The status a line should carry the moment it is sent: food lands straight on
-// the kitchen board, drinks wait at received.
+// The status a line should carry the moment it is sent: cooked food lands
+// straight on the kitchen board, serve-direct lines (drinks, cold towels,
+// desserts, snacks) wait at received.
 export function initialItemStatus(item) {
-  return isDrinkItem(item) ? 'received' : 'in_kitchen';
+  return isServeDirectItem(item) ? 'received' : 'in_kitchen';
 }
 
 // Stamp the fields the kitchen board needs onto a freshly-added line: a stable
