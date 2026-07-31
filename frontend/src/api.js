@@ -177,12 +177,14 @@ export async function fetchStockItems() {
   return items;
 }
 
-// Adjust one item by delta (+1 / +10 / -1 ...). Returns the updated item.
-export async function adjustStockItem(id, delta) {
+// Adjust one item by delta (+1 / +10 / -1 ...). An optional `reason` explains a
+// removal (e.g. "เจ้าของดื่มเอง") and is recorded in the stock history. Returns
+// the updated item.
+export async function adjustStockItem(id, delta, reason) {
   const { item } = await authedJson(`/api/stock-items/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ delta }),
+    body: JSON.stringify({ delta, reason }),
   });
   return item;
 }
@@ -217,6 +219,14 @@ export async function consumeStockByName(name, qty) {
     body: JSON.stringify({ name, qty }),
   });
   return item;
+}
+
+// The stock audit trail (ประวัติการบันทึกสต็อก) — who changed what, newest
+// first. Returns [{ id, itemName, category, action, delta, quantityAfter,
+// byUser, byName, createdAt }].
+export async function fetchStockHistory(limit = 200) {
+  const { items } = await authedJson(`/api/stock-history?limit=${encodeURIComponent(limit)}`);
+  return items;
 }
 
 // Bump every item by delta ("เติมทั้งหมด"). Returns how many rows changed.

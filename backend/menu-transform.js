@@ -114,6 +114,14 @@ function rowTheme(row) {
   return t === 'night' || t === 'both' || t === 'none' ? t : 'day';
 }
 
+// The storefront(s) a row's theme puts it in. Used by the extras/choices
+// builders, which file every row under one or both shifts.
+function themesFor(theme) {
+  if (theme === 'both') return ['day', 'night'];
+  if (theme === 'none') return [];
+  return [theme];
+}
+
 // Stable, readable id derived from the dish identity rather than row position,
 // so an owner's `available` toggle survives rows being reordered.
 //
@@ -262,31 +270,36 @@ export function menuRowsToMenu(rows) {
 // Rows whose หัวข้อ is a CHOICE_HEADING are handled by choiceRowsToChoices()
 // instead: as tick-boxes they would let a customer order both ไซส์ M and
 // ไซส์ L, or two sweetness levels at once.
-// The night bar keeps ONE list of its own (addons.night) rather than the
-// food/drink split — see addonsFor() in frontend/src/menu-groups.js. Night rows
-// therefore bypass the storefront buckets entirely.
+//
+// Both storefronts are built the same way — เรินเก่า (night) is not a special
+// case with one undivided list any more. The result is scoped by shift so the
+// two never borrow each other's extras:
+//
+//   { day:   { food: [...], drink: [...] },
+//     night: { food: [...], drink: [...] } }
+//
+// A row marked 'both' lands in both shifts; 'none' is filed nowhere.
 export function addonRowsToAddons(rows) {
   const addonRows = rows.filter((r) => text(r[COL.kind]) === KIND_ADDON);
-  const out = { food: [], drink: [], night: [] };
+  const out = { day: { food: [], drink: [] }, night: { food: [], drink: [] } };
 
   for (const row of addonRows) {
     const name = text(row[COL.name]);
     if (!name) continue;
     if (CHOICE_HEADINGS.includes(text(row[COL.heading]))) continue;
 
-    const theme = rowTheme(row);
-    const bucket = theme === 'night'
-      ? out.night
-      : (text(row[COL.group]) === DRINK_GROUP ? out.drink : out.food);
-    // สั่งกลับบ้าน is listed under both อาหาร and เพิ่มเติม — keep it once.
-    if (bucket.some((a) => a.name === name)) continue;
-
-    bucket.push({
-      id: idFor(theme, 'addon', name),
-      name,
-      nameEn: text(row[COL.nameEn]),
-      price: toNumber(row[COL.price], 0),
-    });
+    const group = text(row[COL.group]) === DRINK_GROUP ? 'drink' : 'food';
+    for (const theme of themesFor(rowTheme(row))) {
+      const bucket = out[theme][group];
+      // สั่งกลับบ้าน is listed under both อาหาร and เพิ่มเติม — keep it once.
+      if (bucket.some((a) => a.name === name)) continue;
+      bucket.push({
+        id: idFor(theme, 'addon', name),
+        name,
+        nameEn: text(row[COL.nameEn]),
+        price: toNumber(row[COL.price], 0),
+      });
+    }
   }
   return out;
 }
@@ -298,38 +311,45 @@ export function addonRowsToAddons(rows) {
 //
 // Row order is preserved and the FIRST option of each group is the default,
 // which is why 100% (หวานปกติ) leading the sweetness rows matters.
-// Night rows are skipped: choicesFor() returns nothing for the night menu, so a
-// ขนาด/ระดับความหวาน group there would be built and never shown.
+//
+// Scoped by shift exactly like the extras above. Night rows used to be dropped
+// here because the night storefront showed no pick-one groups at all; it now
+// runs the same rules as the day shop, so its ขนาด / ระดับความหวาน rows are
+// built too.
 export function choiceRowsToChoices(rows) {
   const addonRows = rows.filter((r) => text(r[COL.kind]) === KIND_ADDON);
-  const out = { food: [], drink: [] };
+  const out = { day: { food: [], drink: [] }, night: { food: [], drink: [] } };
 
   for (const row of addonRows) {
-    if (rowTheme(row) === 'night') continue;
     const heading = text(row[COL.heading]);
     if (!CHOICE_HEADINGS.includes(heading)) continue;
     const name = text(row[COL.name]);
     if (!name) continue;
 
-    const bucket = text(row[COL.group]) === DRINK_GROUP ? out.drink : out.food;
-    let group = bucket.find((g) => g.name === heading);
-    if (!group) {
-      group = {
-        id: idFor('day', 'choice', heading),
-        name: heading,
-        nameEn: text(row[COL.headingEn]),
-        options: [],
-      };
-      bucket.push(group);
+    const group = text(row[COL.group]) === DRINK_GROUP ? 'drink' : 'food';
+    for (const theme of themesFor(rowTheme(row))) {
+      const bucket = out[theme][group];
+      let entry = bucket.find((g) => g.name === heading);
+      if (!entry) {
+        entry = {
+          id: idFor(theme, 'choice', heading),
+          name: heading,
+          nameEn: text(row[COL.headingEn]),
+          options: [],
+        };
+        bucket.push(entry);
+      }
+      if (entry.options.some((o) => o.name === name)) continue;
+      entry.options.push({ name, nameEn: text(row[COL.nameEn]), price: toNumber(row[COL.price], 0) });
     }
-    if (group.options.some((o) => o.name === name)) continue;
-    group.options.push({ name, nameEn: text(row[COL.nameEn]), price: toNumber(row[COL.price], 0) });
   }
 
   // A group with one option is not a choice — hide it rather than show a radio
   // button that cannot be changed.
-  for (const key of ['food', 'drink']) {
-    out[key] = out[key].filter((g) => g.options.length >= 2);
+  for (const theme of ['day', 'night']) {
+    for (const key of ['food', 'drink']) {
+      out[theme][key] = out[theme][key].filter((g) => g.options.length >= 2);
+    }
   }
   return out;
 }

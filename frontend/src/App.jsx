@@ -5,7 +5,16 @@ import OwnerView from './components/OwnerView';
 import LoginPage from './components/LoginPage';
 import { fetchState, saveResource, subscribeToState, login, setAuthToken } from './api';
 import { shiftNow } from './shift';
-import { ShieldCheck, Key, LogOut, Sun, Moon, Smartphone, Languages } from 'lucide-react';
+import { normalizeGroupStore } from './menu-groups';
+import {
+  tableForScan,
+  resolveSeating,
+  readTableFollow,
+  writeTableFollow,
+  readSeenBills,
+  writeSeenBills,
+} from './table-follow';
+import { ShieldCheck, Key, LogOut, Sun, Moon, Smartphone, Languages, ChevronDown } from 'lucide-react';
 import logoImg from './assets/logo.jpg';
 
 const DEFAULT_MENU = [
@@ -39,25 +48,34 @@ const DEFAULT_MENU = [
   { id: 'n6', name: 'ข้อไก่ทอดงาสามสี', price: 120, category: 'ของกินเล่น', theme: 'night', emoji: '🍗', desc: 'ข้อกระดูกอ่อนไก่ชุบแป้งบางๆ ทอดโรยด้วยงาขาว งาดำ และงาขี้ม้อนกรุบกรอบ', available: true }
 ];
 
-// Extras offered in the order dialog, keyed by which storefront they belong to.
-// `food` and `drink` are replaced by the Google Sheet's รายการเสริม rows as soon
-// as the backend responds; these values are only the pre-load fallback. `night`
-// has no sheet behind it and stays curated here.
+// Extras, scoped per storefront so เรินเก่า and the day shop never borrow each
+// other's list while running the same food/drink rules. Replaced by the sheet's
+// รายการเสริม rows once the backend responds — these only cover the first render.
 const DEFAULT_ADDONS = {
-  food: [
-    { id: 'a1', name: 'ไข่เจียว', price: 10 },
-    { id: 'a2', name: 'ไข่ดาว', price: 10 }
-  ],
-  drink: [],
-  night: [
-    { id: 'a4', name: 'เพิ่มถังน้ำแข็งเกล็ดโต', price: 20 },
-    { id: 'a5', name: 'เลมอนฝานนำเข้า', price: 15 }
-  ]
+  day: {
+    food: [
+      { id: 'a1', name: 'ไข่เจียว', price: 10 },
+      { id: 'a2', name: 'ไข่ดาว', price: 10 }
+    ],
+    drink: [],
+  },
+  night: {
+    food: [],
+    // Bar extras go with the drinks they belong to, the same way a day topping
+    // sits under drink rather than being offered on every dish.
+    drink: [
+      { id: 'a4', name: 'เพิ่มถังน้ำแข็งเกล็ดโต', price: 20 },
+      { id: 'a5', name: 'เลมอนฝานนำเข้า', price: 15 }
+    ],
+  },
 };
 
-// Pick-exactly-one groups (ขนาด / ระดับความหวาน). Replaced by the sheet's
-// รายการเสริม rows once the backend responds; the night bar has none.
-const DEFAULT_CHOICES = { food: [], drink: [], night: [] };
+// Pick-exactly-one groups (ขนาด / ระดับความหวาน), same shape. Both shifts build
+// them from their own รายการเสริม rows.
+const DEFAULT_CHOICES = {
+  day: { food: [], drink: [] },
+  night: { food: [], drink: [] },
+};
 
 const DEFAULT_STOCK = {
   // Day-shift stock (kitchen ingredients / limited daily dishes).
@@ -141,7 +159,9 @@ function App() {
   });
   const [tableNo, setTableNo] = useState(() => {
     const tp = readTableParam();
-    if (tp) return tp.table;
+    // A phone that was re-seated resumes at its new table straight away, so a
+    // refresh never flashes (or sticks on) the number printed on the old QR.
+    if (tp) return tableForScan(tp.table);
     return parseInt(localStorage.getItem('tableNo') || '1');
   });
   // Customer-facing menu language ('th' | 'en'). Only the customer view reads
@@ -210,6 +230,9 @@ function App() {
   const [activeShop, setActiveShop] = useState(() => readSession()?.shop || null);
   const [toast, setToast] = useState({ show: false, message: '' });
   const [showPwaModal, setShowPwaModal] = useState(false);
+  // Whether the header's profile chip (พนักงาน / ผู้บริหาร) has its menu open.
+  // That menu is where ออกจากระบบ lives, so it is only ever opened by those two.
+  const [profileOpen, setProfileOpen] = useState(false);
   // The browser's deferred install event (Chrome/Edge/Android fire
   // `beforeinstallprompt` and let us call `.prompt()` on a user gesture). Held
   // in a ref because it is single-use and must survive re-renders untouched;
@@ -278,6 +301,49 @@ function App() {
     localStorage.setItem('lang', lang);
   }, [lang]);
 
+  // --- ตามบิลที่พนักงานย้ายโต๊ะ ------------------------------------------------
+  // A diner's phone is pinned to the table number it scanned, so when staff move
+  // the bill (ปุ่ม "ย้ายโต๊ะ" in the edit-bill modal) the order would simply
+  // vanish from that phone. Instead the phone follows its own bill to the new
+  // number, and the header reads the new table from then on.
+  //
+  // The match is on bill IDs this phone has actually SEEN open at its own table,
+  // not on the bill's `movedFrom` breadcrumb alone. That distinction is the
+  // whole safety of it: the next customer seated at the old table has never seen
+  // the previous group's bill, so they are never dragged along with it.
+  const seenBillsRef = useRef(null);
+  const firstSyncRef = useRef(true);
+  useEffect(() => {
+    if (role !== 'customer') return;
+    // Wait for the real orders to arrive. `orders` starts as [] on every load,
+    // and resolving against that empty list would forget every remembered bill.
+    if (loadState !== 'ready') return;
+    if (!seenBillsRef.current) seenBillsRef.current = readSeenBills();
+
+    // The first pass after a (re)load is catching up on a move that already
+    // happened, so it re-points the phone silently. Only a move that lands while
+    // the diner is looking at the screen is worth announcing.
+    const isCatchUp = firstSyncRef.current;
+    firstSyncRef.current = false;
+
+    const seen = seenBillsRef.current;
+    const scan = readTableParam();
+    const before = readTableFollow();
+    const { table, follow, moved } = resolveSeating({
+      orders,
+      currentTable: tableNo,
+      scanTable: scan?.table ?? null,
+      seen,
+      follow: before,
+    });
+
+    writeSeenBills(seen);
+    if (JSON.stringify(follow ?? null) !== JSON.stringify(before ?? null)) writeTableFollow(follow);
+    if (Number(table) !== Number(tableNo)) setTableNo(table);
+    if (moved && !isCatchUp) showToast(`พนักงานย้ายโต๊ะให้คุณแล้ว — ตอนนี้คือโต๊ะ ${table}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orders, tableNo, role, loadState]);
+
   // Load the shared state from the backend, then keep it live over SSE — this is
   // what lets a customer's order appear on the staff tab (and vice-versa) in
   // real time. It re-runs whenever the logged-in user changes (login/logout) so
@@ -292,8 +358,11 @@ function App() {
       if (s.staff) setStaffLocal(s.staff);
       if (s.settings) setSettingsLocal({ ...DEFAULT_SETTINGS, ...s.settings });
       if (s.expenses) setExpensesLocal(s.expenses);
-      if (s.addons) setAddonsLocal({ ...DEFAULT_ADDONS, ...s.addons });
-      if (s.choices) setChoicesLocal({ ...DEFAULT_CHOICES, ...s.choices });
+      // Normalised rather than spread over the defaults: stored state may still
+      // carry the pre-split shape, and a shallow spread would leave the day
+      // defaults sitting on top of the real day lists.
+      if (s.addons) setAddonsLocal(normalizeGroupStore(s.addons));
+      if (s.choices) setChoicesLocal(normalizeGroupStore(s.choices));
       if (s.timeclock) setTimeclockLocal(s.timeclock);
       if (s.payroll) setPayrollLocal(s.payroll);
     };
@@ -320,7 +389,9 @@ function App() {
   useEffect(() => {
     const tp = readTableParam();
     if (tp) {
-      setTableNo(tp.table);
+      // Must go through tableForScan, not tp.table: this effect would otherwise
+      // drag a re-seated phone back to the number on its QR every single load.
+      setTableNo(tableForScan(tp.table));
       setRole('customer');
       // A QR scan is a fresh customer arrival: an explicit ?table-day /
       // ?table-night link fixes the shift; a plain ?table shows whichever shop
@@ -328,7 +399,7 @@ function App() {
       // session, which could stamp a daytime order onto the night board/bills.
       setTheme(tp.shift || shiftNow());
       const suffix = tp.shift === 'day' ? ' (กลางวัน)' : tp.shift === 'night' ? ' (กลางคืน)' : '';
-      showToast(`สแกนเข้าโต๊ะหมายเลข ${tp.table}${suffix} สำเร็จ`);
+      showToast(`สแกนเข้าโต๊ะหมายเลข ${tableForScan(tp.table)}${suffix} สำเร็จ`);
     }
   }, []);
 
@@ -363,6 +434,7 @@ function App() {
   };
 
   const handleLogout = () => {
+    setProfileOpen(false);
     setActiveStaffUser(null);
     setActiveRole(null);
     setActiveShop(null);
@@ -376,6 +448,7 @@ function App() {
   // Called when the backend rejects a protected write because our session token
   // is missing or expired. Clear the stale session and send back to login.
   const handleSessionExpired = () => {
+    setProfileOpen(false);
     setActiveStaffUser(null);
     setActiveRole(null);
     setActiveShop(null);
@@ -408,6 +481,9 @@ function App() {
     }
   };
 
+  // The two panels that get a desktop-width layout (see the shell below).
+  const isBackOffice = role === 'staff' || role === 'owner';
+
   return (
     <div
       className={`min-h-screen transition-colors duration-500 flex flex-col ${theme === 'day' ? 'theme-day' : 'theme-night'}`}
@@ -419,8 +495,12 @@ function App() {
         <span className="font-medium font-thai">{toast.message}</span>
       </div>
 
-      {/* CORE MOBILE SHELL */}
-      <div className={`flex flex-col flex-1 w-full max-w-md mx-auto shadow-2xl relative overflow-hidden transition-all duration-500 min-h-screen text-ink ${theme === 'day' ? 'surface-cozy' : 'bg-app border-x border-line'}`}>
+      {/* CORE SHELL — a phone-width column by default. The back office (พนักงาน /
+          ผู้บริหาร) is the part actually opened on a desktop or a counter tablet,
+          so those two widen with the screen instead of leaving a 448px strip in
+          the middle of a monitor. The diner's menu keeps the phone shape: it is
+          reached by scanning a QR at the table, which is a phone by definition. */}
+      <div className={`flex flex-col flex-1 w-full mx-auto shadow-2xl relative overflow-hidden transition-all duration-500 min-h-screen text-ink ${isBackOffice ? 'ui-desktop-scale max-w-md lg:max-w-4xl xl:max-w-6xl' : 'max-w-md'} ${theme === 'day' ? 'surface-cozy' : 'bg-app border-x border-line'}`}>
 
         {/* TOP NAVBAR */}
         <header className={`px-3.5 py-3 flex items-center justify-between gap-3 transition-colors duration-500 shadow-md text-header-ink ${theme === 'day' ? 'wood-grain' : 'border-b border-line bg-strip'}`}>
@@ -477,24 +557,65 @@ function App() {
             </button>
             )}
 
-            {/* Static role badge. There is intentionally no switcher: which panel
+            {/* Role badge. There is intentionally no panel switcher: which panel
                 you see is fixed by how you arrived (QR scan → customer, or the
-                account you logged in as → staff / owner). */}
+                account you logged in as → staff / owner).
+
+                For staff/owner the badge doubles as the profile button — tapping
+                it drops down who you are signed in as and ออกจากระบบ. A customer's
+                โต๊ะ N badge has nothing to open, so it stays a plain label. */}
             {role !== 'login' && (
-              <div
-                className={`flex items-center gap-1.5 rounded-full font-kanit font-semibold tracking-wide bg-raised ${theme === 'day' ? 'text-raised-ink text-base px-5 py-2 shadow-sm' : 'border border-line-strong text-ink text-sm px-4 py-2'}`}
-              >
-                {role === 'customer' && <span>โต๊ะ {tableNo}</span>}
-                {role === 'staff' && (
-                  <>
-                    <ShieldCheck className="w-3.5 h-3.5 text-accent" />
-                    <span>พนักงาน{activeShop === 'night' ? 'กลางคืน' : 'กลางวัน'}</span>
-                  </>
+              <div className="relative flex-shrink-0">
+                {role === 'customer' ? (
+                  <div
+                    className={`flex items-center gap-1.5 rounded-full font-kanit font-semibold tracking-wide bg-raised ${theme === 'day' ? 'text-raised-ink text-base px-5 py-2 shadow-sm' : 'border border-line-strong text-ink text-sm px-4 py-2'}`}
+                  >
+                    <span>โต๊ะ {tableNo}</span>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setProfileOpen((open) => !open)}
+                    aria-haspopup="menu"
+                    aria-expanded={profileOpen}
+                    title="โปรไฟล์ / ออกจากระบบ"
+                    className={`flex items-center gap-1.5 rounded-full font-kanit font-semibold tracking-wide bg-raised hover:bg-raised-hover transition-colors ${theme === 'day' ? 'text-raised-ink text-base px-5 py-2 shadow-sm' : 'border border-line-strong text-ink text-sm px-4 py-2'}`}
+                  >
+                    {role === 'staff' ? (
+                      <>
+                        <ShieldCheck className="w-3.5 h-3.5 text-accent" />
+                        <span>พนักงาน{activeShop === 'night' ? 'กลางคืน' : 'กลางวัน'}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Key className="w-3.5 h-3.5 text-accent" />
+                        <span>ผู้บริหาร</span>
+                      </>
+                    )}
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${profileOpen ? 'rotate-180' : ''}`} />
+                  </button>
                 )}
-                {role === 'owner' && (
+
+                {/* PROFILE MENU — anchored under the badge. The transparent sheet
+                    behind it turns any tap elsewhere into "close". */}
+                {profileOpen && role !== 'customer' && (
                   <>
-                    <Key className="w-3.5 h-3.5 text-accent" />
-                    <span>ผู้บริหาร</span>
+                    <div className="fixed inset-0 z-[90]" onClick={() => setProfileOpen(false)} />
+                    <div className="absolute right-0 top-full mt-2 w-56 z-[95] bg-admin-card text-neutral-800 rounded-2xl shadow-2xl border border-neutral-100 p-3 space-y-2.5 font-thai animate-slide-up">
+                      <div className="px-1">
+                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">ล็อกอินเป็น</span>
+                        <span className="font-bold text-sm text-neutral-800 break-all">{activeStaffUser}</span>
+                        <span className="text-[10px] text-neutral-400 block">
+                          {role === 'owner' ? 'ผู้บริหาร' : `พนักงาน${activeShop === 'night' ? 'กลางคืน' : 'กลางวัน'}`}
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => { setProfileOpen(false); handleLogout(); }}
+                        className="w-full flex items-center justify-center gap-1.5 bg-red-500 hover:bg-red-600 text-white font-bold py-2.5 rounded-xl transition-colors text-xs"
+                      >
+                        <LogOut className="w-3.5 h-3.5" />
+                        <span>ออกจากระบบ</span>
+                      </button>
+                    </div>
                   </>
                 )}
               </div>
@@ -601,21 +722,9 @@ function App() {
           )}
         </main>
 
-        {/* LOGOUT ACTION FOR STAFF/OWNER */}
-        {(role === 'staff' || role === 'owner') && (
-          <div className="p-3 border-t text-center flex justify-between items-center text-xs font-thai bg-strip border-line text-ink">
-            <span className="font-semibold text-[11px]">
-              ล็อกอินเป็น: <b className="text-amber-600">{activeStaffUser}</b>
-            </span>
-            <button 
-              onClick={handleLogout}
-              className="flex items-center gap-1 bg-red-500 hover:bg-red-600 text-white font-bold py-1 px-3 rounded-full transition-colors font-thai text-[10px]"
-            >
-              <LogOut className="w-3 h-3" />
-              <span>ออกจากระบบ</span>
-            </button>
-          </div>
-        )}
+        {/* The old bottom logout strip lived here. Both it and the "ล็อกอินเป็น"
+            line now sit in the header's profile menu, so the panels get that
+            row of screen back. */}
 
         {/* FOOTER */}
         <footer className="text-[10px] text-center py-2 border-t font-thai transition-colors duration-500 border-line bg-strip text-ink-3">

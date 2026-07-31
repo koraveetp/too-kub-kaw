@@ -99,3 +99,67 @@ export async function restockAll(delta) {
   );
   return rowCount;
 }
+
+// ---------------------------------------------------------------------------
+// Stock history (ประวัติการบันทึกสต็อก)
+// ---------------------------------------------------------------------------
+// An append-only audit trail of every stock movement — who changed what, by how
+// much, and the resulting on-hand count. Written from the server endpoints (they
+// know the logged-in user); read by the "ประวัติ" panel in the คลังวัตถุดิบ tab.
+// Logging is best-effort: a failed insert must never block the actual stock
+// change, so callers fire-and-forget and swallow errors.
+
+// Create the table on first run so a fresh clone works without pasting SQL.
+export async function ensureStockHistoryTable() {
+  await getPool().query(`
+    CREATE TABLE IF NOT EXISTS stock_history (
+      id             BIGSERIAL PRIMARY KEY,
+      item_id        INTEGER,
+      item_name      TEXT,
+      category       TEXT,
+      action         TEXT NOT NULL,
+      delta          INTEGER NOT NULL DEFAULT 0,
+      quantity_after INTEGER,
+      note           TEXT,
+      by_user        TEXT,
+      by_name        TEXT,
+      created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  // `note` was added after the first release — backfill it on existing tables.
+  await getPool().query(`ALTER TABLE stock_history ADD COLUMN IF NOT EXISTS note TEXT`);
+  await getPool().query(
+    `CREATE INDEX IF NOT EXISTS stock_history_created_at_idx ON stock_history (created_at DESC)`
+  );
+}
+
+// Append one entry. `delta` is the signed change in on-hand count (+ added,
+// − removed); `quantityAfter` is the resulting count (null for aggregate rows
+// like เติมทั้งหมด where there is no single number).
+export async function logStockChange({
+  itemId = null, itemName = null, category = null, action,
+  delta = 0, quantityAfter = null, note = null, byUser = null, byName = null,
+}) {
+  const { rows } = await getPool().query(
+    `INSERT INTO stock_history
+       (item_id, item_name, category, action, delta, quantity_after, note, by_user, by_name)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     RETURNING id`,
+    [itemId, itemName, category, action, delta, quantityAfter, note, byUser, byName]
+  );
+  return rows[0];
+}
+
+// Most recent movements first. `limit` is capped by the caller.
+export async function fetchStockHistory(limit = 200) {
+  const { rows } = await getPool().query(
+    `SELECT id, item_id AS "itemId", item_name AS "itemName", category, action,
+            delta, quantity_after AS "quantityAfter", note,
+            by_user AS "byUser", by_name AS "byName", created_at AS "createdAt"
+     FROM stock_history
+     ORDER BY created_at DESC, id DESC
+     LIMIT $1`,
+    [limit]
+  );
+  return rows;
+}

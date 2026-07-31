@@ -173,7 +173,13 @@ function TrendChart({ points, range }) {
   const hp = hover != null ? points[hover] : null;
 
   return (
-    <div className="relative">
+    // The SVG scales to its container, and everything inside it — line weights,
+    // axis numbers, markers — scales with it. In the widened desktop shell that
+    // blew the chart up to full monitor width with huge numbers on it, so the
+    // container is capped: a phone is unaffected (its shell is narrower than
+    // max-w-md anyway) and a desktop gets a slightly larger chart, not a poster.
+    // Widen/narrow the chart by changing THIS max-width, nothing else.
+    <div className="relative w-full max-w-md lg:max-w-lg mx-auto">
       <svg
         ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}

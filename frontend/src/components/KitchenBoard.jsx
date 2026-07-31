@@ -3,7 +3,7 @@ import React, { useMemo, useState } from 'react';
 // so a cook reads the word, not an icon they have to decode.
 import { ChefHat, Scissors, Plus, X } from 'lucide-react';
 import { kitchenBoard } from '../kitchen';
-import { deriveBillStatus, ITEM_STATUS_LABELS, ITEM_STATUS_COLORS } from '../orders';
+import { deriveBillStatus, ITEM_STATUS_LABELS, ITEM_STATUS_COLORS, tableLabel } from '../orders';
 
 // ---------------------------------------------------------------------------
 // Kitchen board — Batch ordering
@@ -98,7 +98,9 @@ function KitchenBoard({ orders, setOrders, menu, showToast, shiftView }) {
   }
 
   return (
-    <div className="space-y-2.5 font-thai">
+    // A single tall column on a phone; two on a desktop/tablet, so a busy
+    // kitchen screen shows twice as many tickets without scrolling.
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5 items-start font-thai">
       {cards.map((batch) => {
         const candidates = inKitchenByName.get(batch.name) || [];
         // The card shows its state ONCE, on the button — and the button is
@@ -137,7 +139,7 @@ function KitchenBoard({ orders, setOrders, menu, showToast, shiftView }) {
                 <div className="mt-0.5 space-y-0.5">
                   {batch.members.map((m) => (
                     <div key={m.uid} className="flex items-baseline gap-1.5 text-[11px] flex-wrap">
-                      <span className="font-bold text-neutral-600 whitespace-nowrap">โต๊ะ {m.table}</span>
+                      <span className="font-bold text-neutral-600 whitespace-nowrap">{tableLabel(m.table)}</span>
                       <span className="font-mono text-amber-600 font-bold">{m.qty}x</span>
                       {m.addOns.length > 0 && (
                         <span className="text-neutral-500">+{m.addOns.join(', ')}</span>
@@ -194,7 +196,7 @@ function KitchenBoard({ orders, setOrders, menu, showToast, shiftView }) {
                     onClick={() => splitMember(m)}
                     className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-admin-field hover:bg-neutral-100 text-[11px] font-bold transition"
                   >
-                    <span>โต๊ะ {m.table} · {m.qty} จาน</span>
+                    <span>{tableLabel(m.table)} · {m.qty} จาน</span>
                     <Scissors className="w-3.5 h-3.5 text-neutral-400" />
                   </button>
                 ))}
@@ -210,7 +212,7 @@ function KitchenBoard({ orders, setOrders, menu, showToast, shiftView }) {
                     onClick={() => addToBatch(batch, m)}
                     className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-admin-field hover:bg-neutral-100 text-[11px] font-bold transition"
                   >
-                    <span>โต๊ะ {m.table} · คิว {m.queueNo} · {m.qty} จาน</span>
+                    <span>{tableLabel(m.table)} · คิว {m.queueNo} · {m.qty} จาน</span>
                     <Plus className="w-3.5 h-3.5 text-neutral-400" />
                   </button>
                 ))}

@@ -49,7 +49,7 @@ import {
   hasAvailableColumn,
 } from './menu-db.js';
 import { ensureOrdersTable, loadOrders, saveOrders } from './orders-db.js';
-import { fetchStockItems, fetchStockAvailability, createStockItem, adjustStockItem, restockAll, consumeStockByName } from './stock-db.js';
+import { fetchStockItems, fetchStockAvailability, createStockItem, adjustStockItem, restockAll, consumeStockByName, ensureStockHistoryTable, logStockChange, fetchStockHistory } from './stock-db.js';
 import { hashPassword, verifyPassword, isHashed, signToken, verifyToken } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -337,12 +337,21 @@ async function syncMenuFromDb() {
     ...manualItems,
   ];
   // Same rule for the extras, but an EMPTY bucket from the database never wins:
-  // before the night menu is imported dbAddons.night is [], and letting that
-  // overwrite the seeded night extras would silently empty the bar's list.
+  // before a shift's rows are imported its lists come back [], and letting that
+  // overwrite the seeded extras would silently empty that storefront.
+  //
+  // The buckets are now nested one level per shift — { day: { food, drink },
+  // night: { food, drink } } — so the walk recurses. The flat legacy shape is
+  // still merged correctly by the same code, which is what lets stored state
+  // written before the split survive until the next sync rewrites it.
   const mergeBuckets = (current, incoming) => {
     const out = { ...(current || {}) };
     for (const [bucket, list] of Object.entries(incoming || {})) {
-      if (Array.isArray(list) && list.length) out[bucket] = list;
+      if (Array.isArray(list)) {
+        if (list.length) out[bucket] = list;
+      } else if (list && typeof list === 'object') {
+        out[bucket] = mergeBuckets(out[bucket], list);
+      }
     }
     return out;
   };
@@ -813,6 +822,14 @@ app.post('/api/timeclock/payroll', requireOwner, (req, res) => {
   if (!user) return res.status(400).json({ error: 'missing user' });
   if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'รูปแบบเดือนไม่ถูกต้อง' });
 
+  // An owner account is not on the payroll — เจ้าของร้าน is the one paying, so
+  // there is no wage of theirs to settle. The UI leaves them out of the table
+  // entirely; this stops a stale tab or a hand-made request filing one anyway.
+  const target = (state.staff || []).find((a) => a.user === user);
+  if (target?.role === 'owner') {
+    return res.status(400).json({ error: 'บัญชีเจ้าของร้านไม่มีเงินเดือนให้จ่าย' });
+  }
+
   const key = `${user}__${month}`;
   if (status === 'paid') state.payroll[key] = 'paid';
   else delete state.payroll[key]; // absent = unpaid, keeps the store small
@@ -1143,6 +1160,17 @@ app.patch('/api/menu/order', requireAuth, async (req, res) => {
 // The staff inventory tab reads and edits the `stock_items` table directly.
 // Separate from the in-memory drink `stock` used when taking an order.
 
+// Append one line to the stock history (ประวัติการบันทึกสต็อก), stamping the
+// logged-in user (and their display name). Best-effort: a logging failure must
+// never break the stock change itself, so it's fire-and-forget with a warning.
+function logStock(req, fields) {
+  const user = req.session?.user || null;
+  const acct = (state.staff || []).find((s) => s.user === user);
+  logStockChange({ ...fields, byUser: user, byName: acct?.name || user }).catch((err) =>
+    console.warn(`[backend] stock history log failed: ${err.message}`)
+  );
+}
+
 // The whole inventory.
 app.get('/api/stock-items', requireAuth, async (_req, res) => {
   try {
@@ -1166,6 +1194,10 @@ app.post('/api/stock-items', requireAuth, async (req, res) => {
   }
   try {
     const item = await createStockItem({ category, name, quantity, imageUrl });
+    logStock(req, {
+      action: 'create', itemId: item.id, itemName: item.name,
+      category: item.category, delta: quantity, quantityAfter: item.quantity,
+    });
     res.json({ ok: true, item });
   } catch (err) {
     console.error('[backend] Could not create stock item:', err.message);
@@ -1186,15 +1218,22 @@ app.get('/api/stock-availability', async (_req, res) => {
   }
 });
 
-// Adjust one item's quantity by { delta } (e.g. +1 / +10). Never below 0.
+// Adjust one item's quantity by { delta } (e.g. +1 / +10 / -1). Never below 0.
+// An optional { reason } explains a removal (e.g. "เจ้าของดื่มเอง") and is kept
+// in the stock history so a shrinking count is always accountable.
 app.patch('/api/stock-items/:id', requireAuth, async (req, res) => {
   const id = Number.parseInt(req.params.id, 10);
   const delta = Number(req.body?.delta);
+  const reason = String(req.body?.reason || '').trim().slice(0, 200) || null;
   if (!Number.isInteger(id)) return res.status(400).json({ error: 'รหัสสินค้าไม่ถูกต้อง' });
   if (!Number.isFinite(delta)) return res.status(400).json({ error: 'ค่า delta ต้องเป็นตัวเลข' });
   try {
     const item = await adjustStockItem(id, delta);
     if (!item) return res.status(404).json({ error: 'ไม่พบสินค้านี้ในคลัง' });
+    logStock(req, {
+      action: 'adjust', itemId: item.id, itemName: item.name,
+      category: item.category, delta, quantityAfter: item.quantity, note: reason,
+    });
     res.json({ ok: true, item });
   } catch (err) {
     console.error('[backend] Could not adjust stock item:', err.message);
@@ -1215,6 +1254,13 @@ app.post('/api/stock-items/consume', requireAuth, async (req, res) => {
   }
   try {
     const item = await consumeStockByName(name, qty);
+    // Only log a real movement — an unmatched name is a no-op (item === null).
+    if (item) {
+      logStock(req, {
+        action: qty >= 0 ? 'serve' : 'unserve', itemId: item.id, itemName: item.name,
+        category: item.category, delta: -qty, quantityAfter: item.quantity,
+      });
+    }
     res.json({ ok: true, item });
   } catch (err) {
     console.error('[backend] Could not consume stock:', err.message);
@@ -1228,10 +1274,27 @@ app.post('/api/stock-items/restock', requireAuth, async (req, res) => {
   if (!Number.isFinite(delta)) return res.status(400).json({ error: 'ค่า delta ต้องเป็นตัวเลข' });
   try {
     const changed = await restockAll(delta);
+    // One aggregate line for the whole เติมทั้งหมด, since there's no single count.
+    logStock(req, {
+      action: 'restock-all', itemName: `ทั้งหมด (${changed} รายการ)`,
+      delta, quantityAfter: null,
+    });
     res.json({ ok: true, changed });
   } catch (err) {
     console.error('[backend] Could not restock all:', err.message);
     res.status(502).json({ error: 'เติมสต็อกทั้งหมดไม่สำเร็จ' });
+  }
+});
+
+// The audit trail behind the "ประวัติ" panel: who changed the stock, when, and
+// by how much. Newest first; capped so a long history never floods the client.
+app.get('/api/stock-history', requireAuth, async (req, res) => {
+  const limit = Math.min(Math.max(Number.parseInt(req.query?.limit, 10) || 200, 1), 500);
+  try {
+    res.json({ items: await fetchStockHistory(limit) });
+  } catch (err) {
+    console.error('[backend] Could not read stock history:', err.message);
+    res.status(502).json({ error: 'อ่านประวัติการบันทึกสต็อกไม่สำเร็จ' });
   }
 });
 
@@ -1278,6 +1341,11 @@ const server = app.listen(PORT, () => {
   if (HAS_DB) {
     (async () => {
       await ensureOrdersTable();
+      // The stock audit trail lives in its own table — create it on first run so
+      // logging never fails on a fresh clone.
+      await ensureStockHistoryTable().catch((err) =>
+        console.warn(`[backend] Could not ensure stock_history table: ${err.message}`)
+      );
       const dbOrders = await loadOrders();
       if (dbOrders.length) {
         state.orders = dbOrders; // the database is the source of truth

@@ -11,12 +11,80 @@
 // and customer-session views use.
 // ---------------------------------------------------------------------------
 
-import { orderShift } from './shift';
+import { orderShift, workdayKey } from './shift';
 
 // An item with no `round` (placed before this feature, or the very first batch)
 // counts as round 1.
 export function itemRound(item) {
   return item?.round || 1;
+}
+
+// ---------------------------------------------------------------------------
+// Non-seated order channels (Grab / กลับบ้าน)
+// ---------------------------------------------------------------------------
+// A seated table keeps ONE open bill and every later order merges into it as
+// the next round — that is right for โต๊ะ 5, where the same people are still
+// sitting there.
+//
+// Delivery and takeaway are not that. Two Grab riders arriving in the same
+// minute are two unrelated customers who merely share a "table" name, and
+// folding them into one bill mixes their food together. So these channels are
+// SINGLE-ROUND: every order opens its own numbered bill — Grab#1, Grab#2 —
+// which is what keeps the two apart on the board, on the kitchen ticket and on
+// the slip.
+//
+// Two things deliberately do NOT change:
+//   * the items are stamped exactly like a table's, so they join the same
+//     name-based batches on the cook's board;
+//   * adding to one of these bills afterwards is still possible — but only as
+//     a deliberate act through the แก้ไขบิล editor, never silently by a second
+//     order arriving.
+export const GRAB_TABLE = 'Grab';
+export const TAKEAWAY_TABLE = 'กลับบ้าน';
+export const SINGLE_ROUND_TABLES = [GRAB_TABLE, TAKEAWAY_TABLE];
+
+// The channel a table value belongs to, or null for a seated table:
+//   'Grab' | 'Grab#2' -> 'Grab' ;  'กลับบ้าน#3' -> 'กลับบ้าน' ;  '5' -> null
+export function singleRoundBase(table) {
+  const base = String(table ?? '').split('#')[0].trim();
+  return SINGLE_ROUND_TABLES.includes(base) ? base : null;
+}
+
+// True once a channel table already carries its ticket number ('Grab#2'), so a
+// second pass never renumbers a bill that has one.
+export function isNumberedChannel(table) {
+  return !!singleRoundBase(table) && String(table).includes('#');
+}
+
+// The next free ticket number for `base`, e.g. 'Grab#3'.
+//
+// Numbering restarts each working day and is counted per shift, so the night
+// side does not continue the day side's run. Paid and cancelled bills still
+// count: reusing #1 the moment #1 is settled would put two different Grab#1
+// bills in the same day's history, which is exactly the mix-up this is here to
+// prevent.
+export function nextSingleRoundTable(orders, base, newOrder) {
+  const shift = orderShift(newOrder);
+  const day = workdayKey(newOrder.createdAt ? new Date(newOrder.createdAt) : new Date());
+
+  let highest = 0;
+  for (const o of orders || []) {
+    if (singleRoundBase(o.table) !== base) continue;
+    if (orderShift(o) !== shift) continue;
+    if (!o.createdAt || workdayKey(new Date(o.createdAt)) !== day) continue;
+    // A legacy bill saved as plain 'กลับบ้าน' (before numbering existed) counts
+    // as #1, so the next one becomes #2 rather than colliding with it.
+    const n = Number.parseInt(String(o.table).split('#')[1], 10) || 1;
+    if (n > highest) highest = n;
+  }
+  return `${base}#${highest + 1}`;
+}
+
+// How a table reads on screen. A seated table gets the "โต๊ะ" prefix; a channel
+// ticket is already self-describing ("Grab#2"), and "โต๊ะ Grab#2" would be a
+// contradiction.
+export function tableLabel(table) {
+  return singleRoundBase(table) ? String(table) : `โต๊ะ ${table}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,10 +261,78 @@ function maxRound(items) {
   return (items || []).reduce((m, it) => Math.max(m, itemRound(it)), 1);
 }
 
+// Fold the whole bill `sourceId` into the bill `destId` and drop the source.
+// Used by ย้ายโต๊ะ when two groups push their tables together and ask to pay as
+// one — โต๊ะ 1 และ 2 ย้ายมารวมที่โต๊ะ 8.
+//
+// The destination bill is the one that survives, keeping its id and its เลขที่
+// bill number, so anything already printed or referenced still points at it.
+// Returns the next `orders` array (never mutates `prev`).
+export function absorbBill(prev, sourceId, destId) {
+  const source = (prev || []).find(o => o.id === sourceId);
+  const dest = (prev || []).find(o => o.id === destId);
+  if (!source || !dest || source.id === dest.id) return prev;
+
+  // The incoming rounds continue after the destination's, rather than restarting
+  // at 1 — otherwise the ticket would show two "รอบ 1" blocks and the kitchen
+  // divider would stop meaning "ordered later".
+  const offset = maxRound(dest.items);
+  const moved = (source.items || []).map(it => ({ ...it, round: itemRound(it) + offset }));
+  const items = [...(dest.items || []), ...moved];
+
+  // The merged bill STARTED when the earlier of the two groups sat down, and was
+  // last added to whenever the later of the two last ordered.
+  const startedAt = Math.min(dest.createdAt ?? Infinity, source.createdAt ?? Infinity);
+  const latest = (source.createdAt || 0) > (dest.createdAt || 0) ? source : dest;
+
+  const merged = {
+    ...dest,
+    items,
+    total: (dest.total || 0) + (source.total || 0),
+    status: deriveBillStatus(items),
+    createdAt: Number.isFinite(startedAt) ? startedAt : dest.createdAt,
+    time: latest.time || dest.time,
+    note: [dest.note, source.note].filter(Boolean).join(' | '),
+    // If either side had already asked to เช็กบิล, the merged bill stays in that
+    // state — the request does not quietly disappear because tables were joined.
+    checkout: dest.checkout || source.checkout,
+    movedFrom: [...(dest.movedFrom || []), ...(source.movedFrom || []), String(source.table)],
+    // The ids this bill has swallowed. A diner's phone follows its own bill by
+    // id, so without this trail the absorbed group's screen would lose track of
+    // its order the moment the two bills became one (see App.jsx).
+    absorbedIds: [...(dest.absorbedIds || []), ...(source.absorbedIds || []), source.id],
+    mergedAt: Date.now(),
+  };
+
+  return prev.filter(o => o.id !== sourceId).map(o => (o.id === destId ? merged : o));
+}
+
 // Fold `newOrder` into the table's existing open bill as the next round, or —
 // if the table has no open bill — add it as a fresh bill whose items are round
 // 1. Returns the next `orders` array (never mutates `prev`).
 export function mergeOrder(prev, newOrder) {
+  // Grab / กลับบ้าน never merge: each order is its own numbered bill. This runs
+  // before the lookup below, so an open Grab#1 is not a merge target at all.
+  const channel = singleRoundBase(newOrder.table);
+  if (channel) {
+    const items = newOrder.items.map(it => stampKitchenFields({
+      ...it,
+      round: 1,
+      roundAt: newOrder.createdAt,
+    }));
+    return [...prev, {
+      ...newOrder,
+      // The caller may have picked the number already (the staff take-order
+      // screen does, so its confirmation can name the bill). Only number an
+      // order that arrived as a bare 'Grab' / 'กลับบ้าน'.
+      table: isNumberedChannel(newOrder.table)
+        ? newOrder.table
+        : nextSingleRoundTable(prev, channel, newOrder),
+      items,
+      status: deriveBillStatus(items),
+    }];
+  }
+
   const idx = prev.findIndex(o =>
     String(o.table) === String(newOrder.table) &&
     orderShift(o) === orderShift(newOrder) &&

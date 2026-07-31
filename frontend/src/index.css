@@ -441,3 +441,26 @@
     box-shadow: none !important;
   }
 }
+
+/* ===== ขนาดตัวอักษรของหน้าหลังบ้าน (พนักงาน/ผู้บริหาร) บนจอคอม =====
+   กรอบของสองหน้านี้ขยายได้ถึง ~1150px บนจอใหญ่ (ดู isBackOffice ใน App.jsx)
+   แต่คลาสขนาดตัวอักษรของ Tailwind เป็นหน่วย rem ที่อิงจาก <html> จึงไม่โต
+   ตามกรอบ ผลคือตัวหนังสือ 10-12px ลอยอยู่กลางจอ 27 นิ้ว
+
+   แทนที่จะไล่ใส่ `lg:text-*` ทีละจุดหลายร้อยแห่ง ที่นี่ทับค่าให้ทั้งชุดในที่
+   เดียว เฉพาะข้างใน .ui-desktop-scale (คือกรอบหลังบ้าน) และเฉพาะจอ >= 1024px
+   หน้าลูกค้ากับหน้า login ไม่มีคลาสนี้จึงไม่โดนแตะเลย
+
+   สเกลอยู่ที่ ~1.2 เท่า ปรับตัวเลขในบล็อกนี้ที่เดียวได้ทั้งระบบ
+   (ตัวเลือกมี specificity 0,2,0 จึงชนะคลาส Tailwind ปกติที่เป็น 0,1,0) */
+@media (min-width: 1024px) {
+  .ui-desktop-scale .text-\[9px\]    { font-size: 11px; }
+  .ui-desktop-scale .text-\[9\.5px\] { font-size: 11.5px; }
+  .ui-desktop-scale .text-\[10px\]   { font-size: 12px; }
+  .ui-desktop-scale .text-\[11px\]   { font-size: 13px; }
+  .ui-desktop-scale .text-xs         { font-size: 0.875rem; line-height: 1.35rem; }  /* 12 -> 14 */
+  .ui-desktop-scale .text-sm         { font-size: 1rem;     line-height: 1.5rem; }   /* 14 -> 16 */
+  .ui-desktop-scale .text-base       { font-size: 1.125rem; line-height: 1.65rem; }  /* 16 -> 18 */
+  .ui-desktop-scale .text-lg         { font-size: 1.25rem;  line-height: 1.8rem; }   /* 18 -> 20 */
+  .ui-desktop-scale .text-xl         { font-size: 1.375rem; line-height: 1.9rem; }   /* 20 -> 22 */
+}

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Trash2,
   Settings as SettingsIcon,
@@ -7,13 +7,15 @@ import {
   UtensilsCrossed,
   CalendarClock,
   UserCog,
-  Users
+  Users,
+  RotateCcw
 } from 'lucide-react';
 import OwnerDashboard from './OwnerDashboard';
 import OwnerSummary from './OwnerSummary';
 import OwnerMenu from './OwnerMenu';
 import TableQrCodes from './TableQrCodes';
-import { manualTimeclock, setPayrollStatus, updateStaffAccount } from '../api';
+import { manualTimeclock, setPayrollStatus, updateStaffAccount, fetchStockHistory } from '../api';
+import { STOCK_ACTION_LABELS, STOCK_ACTION_COLORS, fmtStockTime } from '../stock-history';
 import { workdayKey } from '../shift';
 import {
   SHOPS,
@@ -82,13 +84,44 @@ function OwnerView({
   const [staffEdit, setStaffEdit] = useState(null);
   const [savingStaff, setSavingStaff] = useState(false);
 
+  // --- ตารางที่ 3: ประวัติอัปเดตสต็อก ------------------------------------------
+  // The stock_history audit trail (who moved what, when). It lives in PostgreSQL
+  // rather than the shared app state, so it is fetched on demand instead of
+  // arriving over SSE — hence its own loading/error pair and a refresh button.
+  const [stockHistory, setStockHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState('');
+
+  const loadStockHistory = async () => {
+    setHistoryLoading(true);
+    setHistoryError('');
+    try {
+      setStockHistory(await fetchStockHistory(200));
+    } catch (err) {
+      setHistoryError(err.message || 'โหลดประวัติอัปเดตสต็อกไม่สำเร็จ');
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  // Load once the tab is actually opened, so the other four tabs cost nothing.
+  useEffect(() => {
+    if (subTab === 'timeclock') loadStockHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subTab]);
+
   // Days worked (and wages owed) per staff member in the chosen month. A day
   // counts ONLY when it has BOTH a clock-in and a clock-out — hours don't
   // matter (they're only for spotting a late arrival). Staff with no records
   // still get a row showing 0.
+  //
+  // Owner accounts are left out: the เจ้าของร้าน IS the one paying, so a
+  // "เงินเดือน / ยังไม่จ่าย" row against themselves is money owed to nobody —
+  // and marking it จ่ายแล้ว would file a wage into their own รายจ่าย. Their
+  // clock-ins still show in ตารางที่ 2, which is attendance, not payroll.
   const tcMonthlySummary = useMemo(() => {
     const monthRecords = (timeclock || []).filter((r) => (r.date || '').startsWith(tcMonth));
-    return (staff || []).map((s) => {
+    return (staff || []).filter((s) => s.role !== 'owner').map((s) => {
       const days = new Set(
         monthRecords.filter((r) => r.user === s.user && r.inAt && r.outAt).map((r) => r.date)
       ).size;
@@ -215,6 +248,8 @@ function OwnerView({
       user: s.user,
       name: s.name || '',
       pass: '',
+      // An owner account has no wage to set — see tcMonthlySummary.
+      isOwner: s.role === 'owner',
       dailyWage: s.dailyWage ? String(s.dailyWage) : '',
     };
   };
@@ -245,7 +280,9 @@ function OwnerView({
         // Only sent when the owner typed one — an empty string would be read as
         // a request to blank the password.
         ...(staffEdit.pass ? { pass: staffEdit.pass } : {}),
-        dailyWage: staffEdit.dailyWage,
+        // An owner is never on the payroll, so their wage stays pinned at 0
+        // rather than carrying whatever an older record happened to hold.
+        dailyWage: staffEdit.isOwner ? 0 : staffEdit.dailyWage,
       });
       // No local staff write: the server rewrites the account (and moves the
       // person's attendance history if the username changed), then pushes the
@@ -624,6 +661,103 @@ function OwnerView({
                 <div className="text-center py-8 text-neutral-400 font-medium">ไม่มีการลงเวลาในวันที่เลือก</div>
               )}
             </div>
+
+            {/* TABLE 3 — STOCK AUDIT TRAIL: every movement of คลังวัตถุดิบ, newest
+                first. The staff panel shows the same log as a popup; here it is a
+                table beside the attendance ones, because for the owner the two
+                answer one question together: who was on shift, and what did the
+                stock do while they were. */}
+            <div className="bg-admin-card border rounded-2xl p-4 space-y-3 shadow-xs">
+              <div className="flex justify-between items-center gap-2 flex-wrap">
+                <h3 className="font-kanit font-extrabold text-xs text-neutral-400 uppercase tracking-wider">ตารางที่ 3: ประวัติอัปเดตสต็อก</h3>
+                <button
+                  onClick={loadStockHistory}
+                  disabled={historyLoading}
+                  className="flex items-center gap-1.5 border rounded-xl px-3 py-2 bg-admin-field hover:bg-neutral-100 font-bold text-xs transition disabled:opacity-50"
+                  title="โหลดประวัติล่าสุดอีกครั้ง"
+                >
+                  <RotateCcw className={`w-3.5 h-3.5 ${historyLoading ? 'animate-spin' : ''}`} />
+                  <span>รีเฟรช</span>
+                </button>
+              </div>
+
+              {historyLoading && (
+                <div className="text-center py-8 text-neutral-400 font-medium">กำลังโหลดประวัติ…</div>
+              )}
+
+              {historyError && !historyLoading && (
+                <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-center justify-between gap-3">
+                  <span>{historyError}</span>
+                  <button onClick={loadStockHistory} className="font-bold underline shrink-0">ลองใหม่</button>
+                </div>
+              )}
+
+              {!historyLoading && !historyError && stockHistory.length === 0 && (
+                <div className="text-center py-8 text-neutral-400 font-medium">ยังไม่มีประวัติการอัปเดตสต็อก</div>
+              )}
+
+              {!historyLoading && !historyError && stockHistory.length > 0 && (
+                // Capped height with its own scroll: 200 rows would otherwise
+                // push everything above it off the top of a long page.
+                <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-admin-card">
+                      <tr className="text-[10px] text-neutral-400 uppercase border-b border-neutral-100">
+                        <th className="text-left py-2 font-extrabold whitespace-nowrap">เวลา</th>
+                        <th className="text-left py-2 font-extrabold">รายการ</th>
+                        <th className="text-center py-2 font-extrabold whitespace-nowrap">ประเภท</th>
+                        <th className="text-right py-2 font-extrabold whitespace-nowrap">จำนวน</th>
+                        <th className="text-right py-2 font-extrabold whitespace-nowrap">คงเหลือ</th>
+                        <th className="text-left py-2 font-extrabold whitespace-nowrap">โดย</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-neutral-100">
+                      {stockHistory.map((h) => (
+                        <tr key={h.id}>
+                          <td className="py-2.5 pr-2 font-mono text-neutral-500 whitespace-nowrap">{fmtStockTime(h.createdAt)}</td>
+                          <td className="py-2.5 pr-2">
+                            {/* A 'restock-all' row is an aggregate with no item of
+                                its own, so it says so rather than showing a dash. */}
+                            <span className="font-bold text-neutral-800 block">
+                              {h.itemName || (h.action === 'restock-all' ? 'ทุกรายการในคลัง' : '—')}
+                            </span>
+                            {h.category && (
+                              <span className="text-[10px] text-neutral-400 font-medium block">{h.category}</span>
+                            )}
+                            {/* The reason typed when units were taken out. */}
+                            {h.note && (
+                              <span className="text-[10px] text-red-500 font-medium block">📝 {h.note}</span>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-1 text-center">
+                            <span className={`text-[10px] font-bold px-2 py-1 rounded-full whitespace-nowrap ${STOCK_ACTION_COLORS[h.action] || 'bg-neutral-100 text-neutral-600'}`}>
+                              {STOCK_ACTION_LABELS[h.action] || h.action}
+                            </span>
+                          </td>
+                          <td className="py-2.5 pl-2 text-right font-mono font-extrabold whitespace-nowrap">
+                            {h.delta === 0 ? (
+                              <span className="text-neutral-300">—</span>
+                            ) : (
+                              <span className={h.delta > 0 ? 'text-emerald-600' : 'text-red-500'}>
+                                {h.delta > 0 ? `+${h.delta}` : h.delta}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2.5 pl-2 text-right font-mono text-neutral-500">
+                            {h.quantityAfter != null ? h.quantityAfter : <span className="text-neutral-300">—</span>}
+                          </td>
+                          <td className="py-2.5 pl-2 font-bold text-neutral-700 whitespace-nowrap">
+                            {h.byName || h.byUser || 'ไม่ทราบ'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              <p className="text-[10px] text-neutral-400">* แสดง {stockHistory.length} รายการล่าสุด (สูงสุด 200) เรียงจากใหม่ไปเก่า — บันทึกอัตโนมัติทุกครั้งที่สต็อกขยับ รวมถึงตอนกดเสิร์ฟ</p>
+            </div>
           </div>
         );
 
@@ -850,18 +984,20 @@ function OwnerView({
             <button
               key={tab.id}
               onClick={() => setSubTab(tab.id)}
-              // Icon-only tabs: the label is kept as title/aria-label for
-              // tooltips + screen readers, but not rendered as text. With five
-              // tabs sharing one row in the max-w-md shell, dropping the words
-              // gives each icon room to breathe.
+              // Icon-only tabs on a phone: the label is kept as title/aria-label
+              // for tooltips + screen readers, but not rendered as text. With
+              // five tabs sharing one row in the narrow shell, dropping the words
+              // gives each icon room to breathe. A desktop has the width to spell
+              // them out, so the text comes back at lg.
               title={tab.label}
               aria-label={tab.label}
               // shadow-sm, not shadow-xs: shadow-xs is a Tailwind v4 class and
               // this project is on v3, where it compiles to nothing at all —
               // which is what left the selected tab as white-on-near-white.
-              className={`flex-1 py-2.5 px-0.5 rounded-lg flex items-center justify-center transition ${tab.id === subTab ? 'bg-admin-tab text-admin-tab-ink shadow-sm' : 'text-admin-tab-idle hover:text-admin-tab-hover'}`}
+              className={`flex-1 py-2.5 px-0.5 rounded-lg flex items-center justify-center gap-1.5 transition ${tab.id === subTab ? 'bg-admin-tab text-admin-tab-ink shadow-sm' : 'text-admin-tab-idle hover:text-admin-tab-hover'}`}
             >
               <Icon className="w-5 h-5 flex-shrink-0" />
+              <span className="hidden lg:inline text-xs font-kanit">{tab.label}</span>
             </button>
           );
         })}
@@ -872,8 +1008,8 @@ function OwnerView({
 
       {/* BACKFILL MODAL — admin logs a forgotten clock-in/out */}
       {backfill && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end justify-center p-0" onClick={() => setBackfill(null)}>
-          <div className="bg-admin-card rounded-t-3xl max-w-md w-full p-6 space-y-4 text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100 font-thai" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={() => setBackfill(null)}>
+          <div className="bg-admin-card rounded-t-3xl sm:rounded-3xl max-w-md w-full p-6 space-y-4 text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100 font-thai" onClick={(e) => e.stopPropagation()}>
             <div className="flex justify-between items-start">
               <div>
                 <h3 className="text-base font-extrabold font-kanit">ลงเวลาย้อนหลัง</h3>
@@ -940,8 +1076,8 @@ function OwnerView({
 
       {/* STAFF EDIT MODAL — ชื่อ / ชื่อผู้ใช้ / รหัสผ่าน / ค่าแรง */}
       {staffEdit && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end justify-center p-0" onClick={() => setStaffEdit(null)}>
-          <div className="bg-admin-card rounded-t-3xl max-w-md w-full p-6 space-y-4 text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100 font-thai" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={() => setStaffEdit(null)}>
+          <div className="bg-admin-card rounded-t-3xl sm:rounded-3xl max-w-md w-full p-6 space-y-4 text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100 font-thai" onClick={(e) => e.stopPropagation()}>
             <div className="flex justify-between items-start">
               <div>
                 <h3 className="text-base font-extrabold font-kanit">แก้ไขข้อมูลพนักงาน</h3>
@@ -1009,19 +1145,26 @@ function OwnerView({
               <p className="text-[10px] text-neutral-400">ระบบเก็บรหัสผ่านแบบเข้ารหัส จึงดูรหัสเดิมไม่ได้ ตั้งใหม่ได้อย่างเดียว</p>
             </div>
 
-            <div className="space-y-1.5">
-              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">ค่าแรง (บาท/วัน)</label>
-              <input
-                type="number"
-                min="0"
-                step="any"
-                value={staffEdit.dailyWage}
-                onChange={(e) => setStaffEdit({ ...staffEdit, dailyWage: e.target.value })}
-                placeholder="เช่น 400"
-                className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono font-bold text-xs"
-              />
-              <p className="text-[10px] text-neutral-400">เงินเดือน = จำนวนวันที่มาทำงาน × ค่าแรงต่อวัน — แก้ค่านี้แล้วยอดในตารางจะคิดใหม่ทันที</p>
-            </div>
+            {/* No wage box for an owner account — เจ้าของร้าน is the one paying. */}
+            {staffEdit.isOwner ? (
+              <p className="text-[10px] text-neutral-400 bg-neutral-50 border rounded-xl p-2.5 leading-normal">
+                บัญชีเจ้าของร้านไม่มีค่าแรง/เงินเดือน จึงไม่แสดงในตารางเงินเดือน
+              </p>
+            ) : (
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">ค่าแรง (บาท/วัน)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={staffEdit.dailyWage}
+                  onChange={(e) => setStaffEdit({ ...staffEdit, dailyWage: e.target.value })}
+                  placeholder="เช่น 400"
+                  className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono font-bold text-xs"
+                />
+                <p className="text-[10px] text-neutral-400">เงินเดือน = จำนวนวันที่มาทำงาน × ค่าแรงต่อวัน — แก้ค่านี้แล้วยอดในตารางจะคิดใหม่ทันที</p>
+              </div>
+            )}
 
             <button
               onClick={handleSaveStaffEdit}

@@ -2,9 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
 import { orderShift, workdayKey, WORKDAY_START_HOUR } from '../shift';
 import { generateInvoiceNo } from '../invoice';
-import { mergeOrder, itemRound, itemStatus, statusFlowFor, deriveBillStatus, ITEM_STATUS_LABELS, ITEM_STATUS_COLORS, stampKitchenFields, checkoutStage, CHECKOUT_TYPE_LABELS, PAY_METHOD_LABELS } from '../orders';
+import { mergeOrder, absorbBill, itemRound, itemStatus, statusFlowFor, deriveBillStatus, ITEM_STATUS_LABELS, ITEM_STATUS_COLORS, stampKitchenFields, checkoutStage, CHECKOUT_TYPE_LABELS, PAY_METHOD_LABELS, GRAB_TABLE, TAKEAWAY_TABLE, singleRoundBase, nextSingleRoundTable, tableLabel } from '../orders';
 import KitchenBoard from './KitchenBoard';
-import { fetchStockItems, adjustStockItem, restockAllStock, consumeStockByName, resolveImageUrl, clockTime } from '../api';
+import { fetchStockItems, adjustStockItem, restockAllStock, consumeStockByName, fetchStockHistory, resolveImageUrl, clockTime } from '../api';
+import { STOCK_ACTION_LABELS, STOCK_ACTION_COLORS, fmtStockTime } from '../stock-history';
 import generatePayload from 'promptpay-qr';
 import { QRCodeSVG } from 'qrcode.react';
 import {
@@ -64,6 +65,12 @@ function StaffView({
   const [stockLoading, setStockLoading] = useState(false);
   const [stockError, setStockError] = useState('');
   const [stockSearch, setStockSearch] = useState('');
+  // ประวัติการบันทึกสต็อก: the audit-log panel, opened from a button in the
+  // คลังวัตถุดิบ tab. Loaded on demand so a closed panel costs nothing.
+  const [showStockHistory, setShowStockHistory] = useState(false);
+  const [stockHistory, setStockHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState('');
   const [orderFilter, setOrderFilter] = useState('active'); // active, new, cooking, served, paid, all
   // The bill currently being sent to the printer. It is rendered into a hidden
   // #bill-print slip (80mm, styled for the Xprinter XP-80T) and fired straight
@@ -278,7 +285,6 @@ function StaffView({
     playChime(CHECKOUT_CHIME);
   }, [orders, shiftView]);
 
-  const isDay = theme === 'day';
   const filteredMenu = menu.filter(item => item.theme === theme || item.theme === 'both');
   const categories = [...new Set(filteredMenu.map(item => item.category))];
 
@@ -459,6 +465,31 @@ function StaffView({
       .catch((err) => console.error('[stock] ตัดสต็อกไม่สำเร็จ:', err.message || err));
   };
 
+  // How many units of the stock behind a dish are on hand right now — used to
+  // decide whether a serve tap is allowed. A dish can be tied to the in-memory
+  // drink `stock` (stockRef) and/or a คลังวัตถุดิบ row matched by name; when
+  // both apply, the tighter limit wins. Returns null for dishes with no linked
+  // stock (custom / unmatched) — those never block.
+  const availableStockFor = (item) => {
+    const limits = [];
+    if (item?.stockRef && stock[item.stockRef]) limits.push(stock[item.stockRef].count);
+    const name = linkedStockName(item);
+    if (name) {
+      const row = stockItems.find(it => it.name === name);
+      if (row) limits.push(row.quantity);
+    }
+    return limits.length ? Math.min(...limits) : null;
+  };
+
+  // True when serving `item` would push its linked stock below zero — i.e. the
+  // last units were already served to another bill. Un-served items (stockDone)
+  // and non-stock dishes never block.
+  const wouldOverdrawStock = (item) => {
+    if (item.stockDone) return false;
+    const avail = availableStockFor(item);
+    return avail !== null && avail < item.qty;
+  };
+
   // Set ONE dish on a bill to a chosen status (รับออเดอร์ / อยู่ในครัว /
   // เสิร์ฟแล้ว) from the per-item segmented control. The bill's own status is
   // re-derived from its items, so the board/customer keep in sync.
@@ -472,6 +503,9 @@ function StaffView({
     if (next === current) return;
 
     const nowServed = next === 'served' && !item.stockDone;
+    // Block serving once the stock is gone — another bill already took the last
+    // units, so this dish is สินค้าหมดแล้ว and can't be marked เสิร์ฟแล้ว.
+    if (nowServed && wouldOverdrawStock(item)) { showToast('สินค้าหมดแล้ว'); return; }
     const unServed = current === 'served' && next !== 'served' && item.stockDone;
     if (nowServed) { changeStockCount(item.stockRef, -item.qty); consumeLinkedStock(item, item.qty); }
     if (unServed) { changeStockCount(item.stockRef, item.qty); consumeLinkedStock(item, -item.qty); }
@@ -512,7 +546,10 @@ function StaffView({
     // A dish counts as stock-linked via either inventory: the in-memory drink
     // `stock` (stockRef) or a stock_items row matched by name.
     const shouldDeduct = (it) => !it.stockDone && (it.stockRef || linkedStockName(it));
-    const toDeduct = order.items.filter(shouldDeduct);
+    // Any dish whose linked stock has already run dry can't go out — leave it
+    // unserved and warn, rather than driving the count negative.
+    const blocked = (it) => shouldDeduct(it) && wouldOverdrawStock(it);
+    const toDeduct = order.items.filter(it => shouldDeduct(it) && !blocked(it));
     if (toDeduct.length > 0) {
       setStock(prev => {
         const next = { ...prev };
@@ -528,13 +565,18 @@ function StaffView({
 
     setOrders(prev => prev.map(o => {
       if (o.id !== orderId) return o;
-      const items = o.items.map(it => ({
-        ...it,
-        status: 'served',
-        stockDone: shouldDeduct(it) ? true : it.stockDone,
-      }));
+      const items = o.items.map(it => {
+        if (blocked(it)) return it; // สินค้าหมดแล้ว — keep it unserved
+        return {
+          ...it,
+          status: 'served',
+          stockDone: shouldDeduct(it) ? true : it.stockDone,
+        };
+      });
       return { ...o, items, status: deriveBillStatus(items) };
     }));
+
+    if (order.items.some(blocked)) showToast('สินค้าหมดแล้ว บางรายการยังเสิร์ฟไม่ได้');
   };
 
   const getItemStatusLabel = (status) => ITEM_STATUS_LABELS[status] || status;
@@ -739,15 +781,23 @@ function StaffView({
     // action knows what to subtract.
     const orderNo = '#' + String(orders.length + 1).padStart(3, '0');
     const directTotal = takeOrderCart.reduce((sum, item) => sum + (item.basePrice + item.addonCost) * item.qty, 0);
+    const createdAt = Date.now();
+    // Grab / กลับบ้าน never merge into an open bill — each order is its own
+    // ticket. The number is picked here (rather than left to mergeOrder) so the
+    // confirmation below can name the bill that was just opened.
+    const channel = singleRoundBase(targetTable);
+    const billTable = channel
+      ? nextSingleRoundTable(orders, channel, { createdAt, type: theme })
+      : targetTable;
     const newOrder = {
       id: 'B' + Math.floor(1000 + Math.random() * 9000),
       no: orderNo,
       time: new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }),
-      createdAt: Date.now(),
+      createdAt,
       // Shift is stamped from the active menu/theme, so the order lands on the
       // matching day/night board regardless of the wall clock.
       type: theme,
-      table: targetTable,
+      table: billTable,
       items: takeOrderCart.map(item => ({
         name: item.name,
         menuId: item.menuId,
@@ -770,7 +820,7 @@ function StaffView({
     // out yet; otherwise this opens a fresh bill.
     setOrders(prev => mergeOrder(prev, newOrder));
     setTakeOrderCart([]);
-    showToast(`ลงบิล โต๊ะ ${targetTable} สำเร็จแล้ว ✓`);
+    showToast(`ลงบิล ${tableLabel(billTable)} สำเร็จแล้ว ✓`);
     setSubTab('orders');
   };
 
@@ -783,6 +833,75 @@ function StaffView({
     if (!order || order.status === 'paid' || order.status === 'cancelled') return;
     setEditingBill(JSON.parse(JSON.stringify(order)));
     setEditAddMenuId('');
+    setShowMovePicker(false);
+    setMoveConflict('');
+  };
+
+  // --- ย้ายโต๊ะ ---------------------------------------------------------------
+  // Whether the "ย้ายโต๊ะ" table picker is expanded inside the edit-bill modal.
+  const [showMovePicker, setShowMovePicker] = useState(false);
+  // Set when the picked table already has an open bill: staff then choose
+  // whether the two bills become one. Holds that table number, '' = no question
+  // pending.
+  const [moveConflict, setMoveConflict] = useState('');
+
+  // Every open bill sitting at `table` right now (excluding the one being
+  // edited). Used both to tint the picker and to find what to merge into.
+  const openBillsAt = (table) => orders.filter((o) =>
+    String(o.table) === String(table) &&
+    o.status !== 'paid' && o.status !== 'cancelled' &&
+    o.id !== editingBill?.id
+  );
+
+  // Move the bill being edited to another table. This is NOT part of the edit
+  // draft: it saves immediately, because moving a table is a fact about the room
+  // (the group got up and sat somewhere else), not a proposed change to the bill.
+  //
+  // The old table number is kept in `movedFrom` so the diner's phone — which is
+  // pinned to the table it scanned — can follow the bill to its new number
+  // instead of watching its own order disappear (see App.jsx).
+  //
+  // Tapping a table that already has a bill does NOT move anything yet: it asks
+  // first (moveConflict), because "รวมบิล" and "แยกบิล" are both normal answers
+  // and neither should be the silent default.
+  const handleMoveTable = (to) => {
+    if (!editingBill || !to) return;
+    if (String(to) === String(editingBill.table)) { showToast('เป็นโต๊ะเดิมอยู่แล้ว'); return; }
+    if (openBillsAt(to).length > 0) { setMoveConflict(String(to)); return; }
+    moveBillTo(to);
+  };
+
+  // Carry the bill over as its own separate bill.
+  const moveBillTo = (to) => {
+    const from = String(editingBill.table);
+    setOrders((prev) => prev.map((o) => (
+      o.id === editingBill.id
+        ? { ...o, table: String(to), movedFrom: [...(o.movedFrom || []), from], movedAt: Date.now() }
+        : o
+    )));
+    // Keep the open modal pointed at the same bill, now under its new number.
+    setEditingBill({ ...editingBill, table: String(to) });
+    setShowMovePicker(false);
+    setMoveConflict('');
+    showToast(`ย้ายบิลจาก ${tableLabel(from)} ไป โต๊ะ ${to} แล้ว`);
+  };
+
+  // Combine this bill with the one already at `to`, so the joined tables pay as
+  // one. The bill already sitting there is the one that survives (it keeps its
+  // เลขที่บิล); the edited bill is folded into it and disappears, which is why
+  // the editor closes afterwards — the record it was editing no longer exists.
+  const mergeBillInto = (to) => {
+    const from = String(editingBill.table);
+    // If more than one bill is open there, join the earliest — the group that
+    // has been at that table longest is the one the others are moving to.
+    const target = openBillsAt(to).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0];
+    if (!target) { showToast('ไม่พบบิลที่โต๊ะปลายทางแล้ว'); setMoveConflict(''); return; }
+
+    setOrders((prev) => absorbBill(prev, editingBill.id, target.id));
+    setEditingBill(null);
+    setShowMovePicker(false);
+    setMoveConflict('');
+    showToast(`รวมบิล ${tableLabel(from)} เข้ากับ โต๊ะ ${to} เป็นบิลเดียวแล้ว (${target.no})`);
   };
 
   const editBillTotal = (items) =>
@@ -879,14 +998,65 @@ function StaffView({
   // Add `amount` to one item, persisting to the database. Updates the row in
   // place from the server's returned quantity (kept accurate even if two staff
   // edit at once).
-  const adjustStockItemQty = async (id, amount) => {
+  const adjustStockItemQty = async (id, amount, reason) => {
     try {
-      const updated = await adjustStockItem(id, amount);
+      const updated = await adjustStockItem(id, amount, reason);
       setStockItems((prev) => prev.map((it) => (it.id === id ? updated : it)));
-      showToast(`${updated.name} +${amount} (คงเหลือ ${updated.quantity})`);
+      const sign = amount > 0 ? `+${amount}` : `${amount}`;
+      showToast(`${updated.name} ${sign} (คงเหลือ ${updated.quantity})`);
     } catch (err) {
       showToast(err.message || 'ปรับจำนวนคลังไม่สำเร็จ');
     }
+  };
+
+  // The -1 (and any manual removal) opens a popup asking where the units went —
+  // e.g. เจ้าของดื่มเอง / ของเสีย / ทำหล่น — so a shrinking count is always
+  // accountable in the history. `removeTarget` holds the item + amount being
+  // removed while the popup is open. { item, amount } | null
+  const [removeTarget, setRemoveTarget] = useState(null);
+  const [removeReason, setRemoveReason] = useState('');
+  // The black "กรอกเลข" button opens a popup asking how many units to add.
+  // `addTarget` holds the item while that popup is open; `addInput` is the
+  // typed amount, kept as digits-only text so only positive integers get in.
+  const [addTarget, setAddTarget] = useState(null);
+  const [addInput, setAddInput] = useState('');
+
+  // Quick-pick reasons for a stock removal; the free-text box covers anything
+  // else. Tapping a chip just fills that same box, so either path is one field.
+  const REMOVE_REASONS = ['เจ้าของ/พนักงานทานเอง', 'ของเสีย/หมดอายุ', 'ทำหล่น/แตกเสียหาย', 'ปรับยอดให้ตรงจริง'];
+
+  // Open the reason popup for removing `amount` units of `item`.
+  const askRemoveReason = (item, amount = 1) => {
+    setRemoveReason('');
+    setRemoveTarget({ item, amount });
+  };
+
+  // Confirm the removal with the chosen reason, then close the popup.
+  const confirmRemove = async () => {
+    if (!removeTarget) return;
+    const { item, amount } = removeTarget;
+    const reason = removeReason.trim();
+    if (!reason) { showToast('กรุณาระบุเหตุผลที่นำออก'); return; }
+    setRemoveTarget(null);
+    await adjustStockItemQty(item.id, -Math.abs(amount), reason);
+  };
+
+  // Open the "type an amount to add" popup for `item`.
+  const askAddAmount = (item) => {
+    setAddInput('');
+    setAddTarget(item);
+  };
+
+  // Add the typed amount to the item, then close the popup. Only whole
+  // positive numbers are accepted — removals go through askRemoveReason so a
+  // shrinking count always carries a reason.
+  const confirmAdd = async () => {
+    if (!addTarget) return;
+    const amount = Number.parseInt(addInput, 10);
+    if (!Number.isInteger(amount) || amount <= 0) { showToast('กรุณากรอกจำนวนเต็มบวก'); return; }
+    const item = addTarget;
+    setAddTarget(null);
+    await adjustStockItemQty(item.id, amount);
   };
 
   // Bump every item in the database, then reload to reflect the new totals.
@@ -897,6 +1067,20 @@ function StaffView({
       showToast(`เติมสต็อกทั้งหมด +${amount} เรียบร้อย`);
     } catch (err) {
       showToast(err.message || 'เติมสต็อกทั้งหมดไม่สำเร็จ');
+    }
+  };
+
+  // Open the ประวัติ panel and pull the latest audit trail from the server.
+  const openStockHistory = async () => {
+    setShowStockHistory(true);
+    setHistoryLoading(true);
+    setHistoryError('');
+    try {
+      setStockHistory(await fetchStockHistory(200));
+    } catch (err) {
+      setHistoryError(err.message || 'โหลดประวัติการบันทึกสต็อกไม่สำเร็จ');
+    } finally {
+      setHistoryLoading(false);
     }
   };
 
@@ -935,13 +1119,18 @@ function StaffView({
             </div>
 
             {filteredOrders.length > 0 ? (
-              <div className="grid grid-cols-1 gap-3.5">
+              // One column on a phone; two on a desktop, where a single column
+              // stretched across a monitor wastes the screen.
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5 items-start">
                 {filteredOrders.map(order => (
                   <div key={order.id} className="border border-neutral-200 bg-admin-card rounded-2xl p-4 shadow-xs relative">
                     <div className="flex justify-between items-center border-b pb-2 mb-2">
                       <div className="flex items-center gap-2">
-                        <span className="font-extrabold bg-ctl text-ctl-ink text-[11px] px-2 py-0.5 rounded-md font-kanit">
-                          โต๊ะ {order.table}
+                        {/* A Grab/กลับบ้าน ticket carries its own number
+                            (Grab#2) and is tinted differently, so a delivery
+                            bill is never mistaken for a seated table. */}
+                        <span className={`font-extrabold text-[11px] px-2 py-0.5 rounded-md font-kanit ${singleRoundBase(order.table) ? 'bg-violet-600 text-white' : 'bg-ctl text-ctl-ink'}`}>
+                          {tableLabel(order.table)}
                         </span>
                         <span className="font-mono text-neutral-400 text-xs font-semibold">{order.no}</span>
                       </div>
@@ -1016,16 +1205,23 @@ function StaffView({
                               ) : (
                                 /* Segmented per-dish status: every step visible, tap to set. */
                                 <div className="flex rounded-full border border-neutral-200 overflow-hidden">
-                                  {statusFlowFor(item).map(s => (
-                                    <button
-                                      key={s}
-                                      onClick={() => setItemStatusTo(order.id, idx, s)}
-                                      className={`flex-1 text-[10px] font-bold py-1 transition active:scale-95 ${itemStatus(item) === s ? getItemStatusColor(s) : 'bg-admin-card text-neutral-300 hover:text-neutral-500'}`}
-                                      title={`เปลี่ยนสถานะเป็น ${getItemStatusLabel(s)}`}
-                                    >
-                                      {getItemStatusLabel(s)}
-                                    </button>
-                                  ))}
+                                  {statusFlowFor(item).map(s => {
+                                    // The เสิร์ฟแล้ว step is locked out once the
+                                    // linked stock is gone — the dish is หมดแล้ว
+                                    // and another bill took the last units.
+                                    const outOfStock = s === 'served' && itemStatus(item) !== 'served' && wouldOverdrawStock(item);
+                                    return (
+                                      <button
+                                        key={s}
+                                        onClick={() => setItemStatusTo(order.id, idx, s)}
+                                        disabled={outOfStock}
+                                        className={`flex-1 text-[10px] font-bold py-1 transition active:scale-95 ${itemStatus(item) === s ? getItemStatusColor(s) : outOfStock ? 'bg-admin-card text-neutral-200 cursor-not-allowed' : 'bg-admin-card text-neutral-300 hover:text-neutral-500'}`}
+                                        title={outOfStock ? 'สินค้าหมดแล้ว' : `เปลี่ยนสถานะเป็น ${getItemStatusLabel(s)}`}
+                                      >
+                                        {outOfStock ? 'สินค้าหมดแล้ว' : getItemStatusLabel(s)}
+                                      </button>
+                                    );
+                                  })}
                                 </div>
                               )}
                             </div>
@@ -1118,7 +1314,7 @@ function StaffView({
                                 <div className="flex items-start gap-2 text-[11px] font-bold text-amber-900 bg-amber-100 border border-amber-300 rounded-lg px-2.5 py-2">
                                   <Bell className="w-4 h-4 shrink-0 mt-0.5" />
                                   <span>
-                                    โต๊ะ {order.table} ขอเช็กบิล · {CHECKOUT_TYPE_LABELS[order.checkout?.type] || 'เช็กบิลปกติ'}
+                                    {tableLabel(order.table)} ขอเช็กบิล · {CHECKOUT_TYPE_LABELS[order.checkout?.type] || 'เช็กบิลปกติ'}
                                     {isSplit && ' — อย่าลืมหยิบโทรศัพท์ร้าน (แอปถุงเงิน)'}
                                   </span>
                                 </div>
@@ -1187,7 +1383,10 @@ function StaffView({
 
       case 'take-order':
         return (
-          <div className="space-y-4">
+          // Stacked on a phone (pick dishes, then scroll to the bill). On a
+          // desktop the two sit side by side, so the bill stays in sight while
+          // dishes are still being added.
+          <div className="space-y-4 lg:space-y-0 lg:grid lg:grid-cols-2 lg:gap-4 lg:items-start">
             <div className="bg-admin-card border rounded-2xl p-4 space-y-3 shadow-xs">
               <div>
                 <label className="block text-xs font-bold text-neutral-400 mb-1 uppercase">เลือกโต๊ะที่ต้องการรับออเดอร์</label>
@@ -1199,8 +1398,20 @@ function StaffView({
                   {Array.from({ length: settings.tables }, (_, i) => (
                     <option key={i+1} value={String(i+1)}>โต๊ะ {i+1}</option>
                   ))}
-                  <option value="กลับบ้าน">สั่งกลับบ้าน / Takeaway</option>
+                  {/* Not seats — order channels. Each order placed against one
+                      of these opens its OWN numbered bill (Grab#1, Grab#2 …)
+                      instead of merging, so two riders never share a bill. */}
+                  <option value={TAKEAWAY_TABLE}>สั่งกลับบ้าน / Takeaway</option>
+                  <option value={GRAB_TABLE}>Grab / เดลิเวอรี</option>
                 </select>
+                {/* Says the rule out loud at the moment it applies, so nobody
+                    waits for a second round to merge and wonders where it went. */}
+                {singleRoundBase(targetTable) && (
+                  <p className="mt-1.5 text-[10px] text-violet-700 bg-violet-50 border border-violet-200 rounded-lg px-2 py-1.5 font-medium">
+                    ลงบิลครั้งนี้จะเปิดบิลใหม่เป็น <b>{nextSingleRoundTable(orders, singleRoundBase(targetTable), { createdAt: Date.now(), type: theme })}</b> —
+                    ออเดอร์ของแต่ละรายจะไม่รวมกัน ถ้าต้องการเพิ่มรายการในบิลเดิม ให้กด “แก้ไขบิล” ที่หน้าบอร์ด
+                  </p>
+                )}
               </div>
 
               {/* Direct Categories Selector — a dropdown instead of a tab row so
@@ -1218,7 +1429,7 @@ function StaffView({
               </div>
 
               {/* Quick Item List */}
-              <div className="divide-y divide-neutral-100 max-h-56 overflow-y-auto">
+              <div className="divide-y divide-neutral-100 max-h-56 lg:max-h-96 overflow-y-auto">
                 {filteredMenu.filter(m => m.category === directCat).map(dish => {
                   const qty = takeOrderCart.filter(i => i.menuId === dish.id).reduce((s, i) => s + i.qty, 0);
                   return (
@@ -1257,7 +1468,7 @@ function StaffView({
             {takeOrderCart.length > 0 && (
               <div className="bg-admin-card border rounded-2xl p-4 space-y-3.5 shadow-xs font-thai text-xs">
                 <div className="flex justify-between items-center font-kanit font-extrabold text-sm text-neutral-800">
-                  <span>สรุปรายการสั่งซื้อ ({targetTable})</span>
+                  <span>สรุปรายการสั่งซื้อ ({tableLabel(targetTable)})</span>
                   <span className="font-mono text-amber-600">฿{takeOrderCart.reduce((sum, item) => sum + (item.basePrice + item.addonCost) * item.qty, 0).toLocaleString()}</span>
                 </div>
 
@@ -1315,8 +1526,18 @@ function StaffView({
           .sort((a, b) => (a.quantity - b.quantity) || a.name.localeCompare(b.name, 'th'));
         return (
           <div className="space-y-4">
-            <div className="flex justify-between items-center">
-              <h2 className="font-extrabold text-sm font-kanit uppercase tracking-wider text-neutral-400">คลังวัตถุดิบ</h2>
+            <div className="flex justify-between items-center gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <h2 className="font-extrabold text-sm font-kanit uppercase tracking-wider text-neutral-400">คลังวัตถุดิบ</h2>
+                <button
+                  onClick={openStockHistory}
+                  className="flex items-center gap-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 border font-bold py-1.5 px-3 rounded-xl text-xs transition"
+                  title="ดูประวัติการบันทึกสต็อก"
+                >
+                  <Clock className="w-3.5 h-3.5" />
+                  <span>ประวัติ</span>
+                </button>
+              </div>
               <div className="flex items-center gap-1.5">
                 <span className="text-[10px] text-neutral-400 font-bold hidden sm:block">เติมทั้งหมด:</span>
                 <button
@@ -1384,7 +1605,7 @@ function StaffView({
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-3 shrink-0">
+                      <div className="flex items-center gap-2 shrink-0">
                         {isOut && (
                           <span className="flex items-center gap-1 text-[9px] bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-bold">
                             <AlertTriangle className="w-3 h-3" />
@@ -1405,24 +1626,27 @@ function StaffView({
                           <span className="text-[9px] text-neutral-400">หน่วยคงเหลือ</span>
                         </div>
 
-                        {/* Per-item quick add (persists to stock_items) */}
-                        <div className="flex flex-col gap-1">
+                        {/* Per-item quantity controls, one row: + · +1 · -1 — equal
+                            squares so they stay compact and leave the name its
+                            width (persists to stock_items) */}
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => askAddAmount(item)}
+                            className="w-8 h-8 flex items-center justify-center bg-neutral-900 hover:bg-black text-white font-bold rounded-lg text-sm leading-none transition"
+                            title="กรอกจำนวนที่ต้องการเพิ่ม"
+                          >
+                            +
+                          </button>
                           <button
                             onClick={() => adjustStockItemQty(item.id, 1)}
-                            className="bg-neutral-100 hover:bg-neutral-200 text-neutral-700 border font-bold px-2 py-0.5 rounded-lg text-[10px] transition"
+                            className="w-8 h-8 flex items-center justify-center bg-green-500 hover:bg-green-600 text-white font-bold rounded-lg text-[11px] leading-none transition"
                           >
                             +1
                           </button>
                           <button
-                            onClick={() => adjustStockItemQty(item.id, 10)}
-                            className="bg-ctl hover:bg-ctl-hover text-ctl-ink font-bold px-2 py-0.5 rounded-lg text-[10px] transition"
-                          >
-                            +10
-                          </button>
-                          <button
-                            onClick={() => adjustStockItemQty(item.id, -1)}
+                            onClick={() => askRemoveReason(item, 1)}
                             disabled={item.quantity <= 0}
-                            className="bg-red-100 hover:bg-red-200 text-red-700 border border-red-200 font-bold px-2 py-0.5 rounded-lg text-[10px] transition disabled:opacity-40 disabled:cursor-not-allowed"
+                            className="w-8 h-8 flex items-center justify-center bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg text-[11px] leading-none transition disabled:opacity-40 disabled:cursor-not-allowed"
                           >
                             -1
                           </button>
@@ -1546,7 +1770,7 @@ function StaffView({
         >
           <Bell className="w-4 h-4 shrink-0" />
           <span className="text-xs font-bold flex-1">
-            โต๊ะ {checkoutRequests.map((o) => o.table).join(', ')} ขอเช็กบิล
+            {checkoutRequests.map((o) => tableLabel(o.table)).join(', ')} ขอเช็กบิล
             <span className="block text-[10px] font-semibold text-amber-800/80">
               แตะเพื่อไปพิมพ์บิลที่หน้าบอร์ด
             </span>
@@ -1565,7 +1789,7 @@ function StaffView({
           { id: 'orders', label: 'บอร์ด', icon: ClipboardList },
           { id: 'take-order', label: 'รับออเดอร์', icon: PlusCircle },
           { id: 'kitchen', label: 'ครัว', icon: ChefHat },
-          { id: 'stock', label: isDay ? 'คลัง' : 'คลังเครื่องดื่ม', icon: Package },
+          { id: 'stock', label: 'คลัง', icon: Package },
           { id: 'timeclock', label: 'ลงเวลา', icon: Clock },
         ].map(tab => {
           const Icon = tab.icon;
@@ -1585,10 +1809,191 @@ function StaffView({
       {/* PRIMARY SUB-TAB RENDER VIEW */}
       {renderActiveSubTab()}
 
+      {/* ประวัติการบันทึกสต็อก — audit trail of every stock movement */}
+      {showStockHistory && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[120] flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-admin-card rounded-t-3xl sm:rounded-3xl max-w-lg w-full max-h-[85vh] flex flex-col animate-slide-up text-neutral-800 shadow-2xl border-t border-neutral-100">
+            <div className="flex items-center justify-between gap-3 p-5 border-b border-neutral-100">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="w-9 h-9 rounded-xl bg-sky-50 border border-sky-200 text-sky-700 flex items-center justify-center shrink-0">
+                  <Clock className="w-4 h-4" />
+                </span>
+                <div className="min-w-0">
+                  <h3 className="text-base font-extrabold font-kanit leading-tight">ประวัติการบันทึกสต็อก</h3>
+                  <p className="text-[11px] text-neutral-500 font-medium">ใครปรับสต็อกรายการไหน เมื่อไหร่</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  onClick={openStockHistory}
+                  className="p-2 rounded-lg hover:bg-neutral-100 text-neutral-500"
+                  title="รีเฟรช"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setShowStockHistory(false)}
+                  className="p-2 rounded-lg hover:bg-neutral-100 text-neutral-500"
+                  title="ปิด"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-y-auto p-4 space-y-2">
+              {historyLoading && (
+                <div className="p-6 text-center text-xs text-neutral-400 font-thai">กำลังโหลดประวัติ…</div>
+              )}
+              {historyError && !historyLoading && (
+                <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-2xl text-xs font-thai flex items-center justify-between gap-3">
+                  <span>{historyError}</span>
+                  <button onClick={openStockHistory} className="font-bold underline shrink-0">ลองใหม่</button>
+                </div>
+              )}
+              {!historyLoading && !historyError && stockHistory.length === 0 && (
+                <div className="p-6 text-center text-xs text-neutral-400 font-thai">ยังไม่มีประวัติการบันทึกสต็อก</div>
+              )}
+              {!historyLoading && !historyError && stockHistory.map((h) => (
+                <div key={h.id} className="flex items-start gap-3 p-3 bg-admin-field rounded-2xl text-xs font-thai">
+                  <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full shrink-0 mt-0.5 ${STOCK_ACTION_COLORS[h.action] || 'bg-neutral-100 text-neutral-600'}`}>
+                    {STOCK_ACTION_LABELS[h.action] || h.action}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="font-bold text-neutral-800 truncate">{h.itemName || '—'}</p>
+                    {h.note && (
+                      <p className="text-[10px] text-red-500 font-medium truncate">📝 {h.note}</p>
+                    )}
+                    <p className="text-[10px] text-neutral-400 font-medium">
+                      โดย {h.byName || h.byUser || 'ไม่ทราบ'} · {fmtStockTime(h.createdAt)}
+                    </p>
+                  </div>
+                  <div className="text-right shrink-0">
+                    {h.delta !== 0 && (
+                      <span className={`font-mono font-extrabold ${h.delta > 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                        {h.delta > 0 ? `+${h.delta}` : h.delta}
+                      </span>
+                    )}
+                    {h.quantityAfter != null && (
+                      <p className="text-[10px] text-neutral-400 font-medium">เหลือ {h.quantityAfter}</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ADD-STOCK AMOUNT — the black กรอกเลข button: type how many units to add.
+          The box filters to digits as you type, so only จำนวนเต็มบวก can be sent. */}
+      {addTarget && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[120] flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-admin-card rounded-t-3xl sm:rounded-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 shadow-2xl border-t border-neutral-100">
+            <div className="flex items-start gap-3">
+              <span className="w-10 h-10 rounded-xl bg-neutral-900 text-white flex items-center justify-center shrink-0">
+                <Plus className="w-5 h-5" />
+              </span>
+              <div className="min-w-0">
+                <h3 className="text-base font-extrabold font-kanit leading-tight">เพิ่มสต็อก</h3>
+                <p className="text-[11px] text-neutral-500 font-medium font-thai">
+                  {addTarget.name} — คงเหลือตอนนี้ {addTarget.quantity} หน่วย
+                </p>
+              </div>
+            </div>
+
+            <input
+              type="text"
+              inputMode="numeric"
+              value={addInput}
+              onChange={(e) => setAddInput(e.target.value.replace(/\D/g, ''))}
+              onKeyDown={(e) => { if (e.key === 'Enter') confirmAdd(); }}
+              placeholder="กรอกจำนวนเต็มบวก เช่น 24"
+              autoFocus
+              className="w-full border rounded-xl py-2.5 px-3 bg-admin-field text-sm font-bold text-center focus:outline-none focus:ring-1 focus:ring-amber-500 font-thai"
+            />
+
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={() => setAddTarget(null)}
+                className="flex-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 font-bold py-2.5 rounded-xl text-sm transition"
+              >
+                ยกเลิก
+              </button>
+              <button
+                onClick={confirmAdd}
+                disabled={!(Number.parseInt(addInput, 10) > 0)}
+                className="flex-1 bg-neutral-900 hover:bg-black text-white font-bold py-2.5 rounded-xl text-sm transition disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                ยืนยันเพิ่ม
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* REMOVE-STOCK REASON — why units are being taken out (เจ้าของดื่มเอง …) */}
+      {removeTarget && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[120] flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-admin-card rounded-t-3xl sm:rounded-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 shadow-2xl border-t border-neutral-100">
+            <div className="flex items-start gap-3">
+              <span className="w-10 h-10 rounded-xl bg-red-50 border border-red-200 text-red-700 flex items-center justify-center shrink-0">
+                <Minus className="w-5 h-5" />
+              </span>
+              <div className="min-w-0">
+                <h3 className="text-base font-extrabold font-kanit leading-tight">นำสต็อกออก {removeTarget.amount} หน่วย</h3>
+                <p className="text-[11px] text-neutral-500 font-medium">
+                  {removeTarget.item.name} — ระบุเหตุผลที่ของหายไป
+                </p>
+              </div>
+            </div>
+
+            {/* Quick-pick reasons */}
+            <div className="flex flex-wrap gap-2">
+              {REMOVE_REASONS.map((r) => (
+                <button
+                  key={r}
+                  onClick={() => setRemoveReason(r)}
+                  className={`text-[11px] font-bold px-3 py-1.5 rounded-full border transition ${removeReason === r ? 'bg-amber-600 text-white border-amber-600' : 'bg-admin-field text-neutral-600 border-neutral-200 hover:bg-neutral-100'}`}
+                >
+                  {r}
+                </button>
+              ))}
+            </div>
+
+            <input
+              type="text"
+              value={removeReason}
+              onChange={(e) => setRemoveReason(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') confirmRemove(); }}
+              placeholder="หรือพิมพ์เหตุผลเอง เช่น เจ้าของดื่มเอง"
+              autoFocus
+              className="w-full border rounded-xl py-2.5 px-3 bg-admin-field text-sm font-medium focus:outline-none focus:ring-1 focus:ring-amber-500 font-thai"
+            />
+
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={() => setRemoveTarget(null)}
+                className="flex-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 font-bold py-2.5 rounded-xl text-sm transition"
+              >
+                ยกเลิก
+              </button>
+              <button
+                onClick={confirmRemove}
+                disabled={!removeReason.trim()}
+                className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-2.5 rounded-xl text-sm transition disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                ยืนยันนำออก
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* CLOCK-IN PROMPT — first open of a working day with no record yet */}
       {showClockPrompt && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[110] flex items-end justify-center p-0">
-          <div className="bg-admin-card rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 shadow-2xl border-t border-neutral-100">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[110] flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-admin-card rounded-t-3xl sm:rounded-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 shadow-2xl border-t border-neutral-100">
             <div className="flex items-start gap-3">
               <span className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
                 <Clock className="w-5 h-5" />
@@ -1628,15 +2033,15 @@ function StaffView({
 
       {/* ITEM DETAIL MODAL (add-ons + notes + qty) — same options as customer */}
       {selectedItem && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end justify-center p-0">
-          <div className="bg-admin-card rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-admin-card rounded-t-3xl sm:rounded-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
 
             <div className="flex justify-between items-start">
               <div>
                 <h3 className="text-base font-extrabold font-kanit">{selectedItem.name}</h3>
                 <span className="text-amber-600 font-extrabold font-mono text-base block mt-0.5">฿{selectedOption ? selectedOption.price : selectedItem.price}</span>
                 <span className="text-[10px] text-neutral-400 font-medium">
-                  {detailMode === 'editbill' ? `เพิ่มลงบิล โต๊ะ ${editingBill?.table}` : `รับออเดอร์ โต๊ะ ${targetTable}`}
+                  {detailMode === 'editbill' ? `เพิ่มลงบิล ${tableLabel(editingBill?.table)}` : `รับออเดอร์ ${tableLabel(targetTable)}`}
                 </span>
               </div>
               <button
@@ -1783,13 +2188,13 @@ function StaffView({
 
       {/* CUSTOM ITEM MODAL ("เมนูอื่นๆ") — staff-typed item + editable extras */}
       {showCustomModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end justify-center p-0">
-          <div className="bg-admin-card rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-admin-card rounded-t-3xl sm:rounded-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
 
             <div className="flex justify-between items-start">
               <div>
                 <h3 className="text-base font-extrabold font-kanit">เมนูอื่นๆ (คีย์เอง)</h3>
-                <span className="text-[10px] text-neutral-400 font-medium">รับออเดอร์ โต๊ะ {targetTable}</span>
+                <span className="text-[10px] text-neutral-400 font-medium">รับออเดอร์ {tableLabel(targetTable)}</span>
               </div>
               <button
                 onClick={() => setShowCustomModal(false)}
@@ -1911,21 +2316,106 @@ function StaffView({
 
       {/* EDIT BILL MODAL (For modifying active bills) */}
       {editingBill && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-end justify-center p-0">
-          <div className="bg-admin-card rounded-t-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-admin-card rounded-t-3xl sm:rounded-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100">
             
-            <div className="flex justify-between items-center">
-              <h3 className="text-base font-extrabold font-kanit flex items-center gap-1.5 text-neutral-800">
-                <Edit className="text-amber-600 w-4 h-4" />
-                <span>แก้ไขรายการบิล โต๊ะ {editingBill.table}</span>
+            <div className="flex justify-between items-center gap-2">
+              <h3 className="text-base font-extrabold font-kanit flex items-center gap-1.5 text-neutral-800 min-w-0">
+                <Edit className="text-amber-600 w-4 h-4 shrink-0" />
+                <span className="truncate">แก้ไขรายการบิล {tableLabel(editingBill.table)}</span>
               </h3>
-              <button 
-                onClick={() => setEditingBill(null)}
-                className="p-1.5 rounded-full bg-neutral-100 hover:bg-neutral-200 text-neutral-500 transition"
-              >
-                <X className="w-4.5 h-4.5" />
-              </button>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  onClick={() => { setMoveConflict(''); setShowMovePicker((open) => !open); }}
+                  className={`flex items-center gap-1 font-bold px-2.5 py-1.5 rounded-lg text-[11px] transition ${showMovePicker ? 'bg-sky-600 text-white' : 'bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-200'}`}
+                  title="ย้ายบิลนี้ไปโต๊ะอื่น"
+                >
+                  <MapPin className="w-3.5 h-3.5" />
+                  <span>ย้ายโต๊ะ</span>
+                </button>
+                <button
+                  onClick={() => { setShowMovePicker(false); setMoveConflict(''); setEditingBill(null); }}
+                  className="p-1.5 rounded-full bg-neutral-100 hover:bg-neutral-200 text-neutral-500 transition"
+                >
+                  <X className="w-4.5 h-4.5" />
+                </button>
+              </div>
             </div>
+
+            {/* ย้ายโต๊ะ PICKER — opens under the heading rather than as a second
+                modal on top of this one. Only seated tables are offered: Grab /
+                กลับบ้าน are delivery channels, not places to sit. */}
+            {showMovePicker && (
+              <div className="bg-sky-50 border border-sky-200 rounded-2xl p-3 space-y-2 text-xs font-thai">
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-sky-700 block">
+                  ย้ายบิลนี้จาก {tableLabel(editingBill.table)} ไปที่
+                </span>
+                <div className="grid grid-cols-5 gap-1.5 max-h-32 overflow-y-auto">
+                  {Array.from({ length: settings.tables }, (_, i) => String(i + 1))
+                    .filter((n) => n !== String(editingBill.table))
+                    .map((n) => {
+                      const busy = orders.some((o) =>
+                        String(o.table) === n && o.status !== 'paid' && o.status !== 'cancelled'
+                      );
+                      return (
+                        <button
+                          key={n}
+                          onClick={() => handleMoveTable(n)}
+                          // A table with an open bill is still selectable — it
+                          // just asks รวม/แยก first — but marked, so staff can
+                          // see at a glance which ones are free.
+                          className={`py-2 rounded-lg font-extrabold font-mono transition border ${moveConflict === n
+                            ? 'bg-sky-600 border-sky-600 text-white'
+                            : busy
+                              ? 'bg-amber-100 border-amber-300 text-amber-800 hover:bg-amber-200'
+                              : 'bg-admin-card border-sky-200 text-neutral-700 hover:bg-sky-100'}`}
+                          title={busy ? `โต๊ะ ${n} — มีบิลเปิดอยู่` : `โต๊ะ ${n} — ว่าง`}
+                        >
+                          {n}
+                        </button>
+                      );
+                    })}
+                </div>
+
+                {/* รวมบิล / แยกบิล — asked only when the chosen table already has
+                    an open bill. Two groups pushing tables together and paying as
+                    one is the common case, so it leads. */}
+                {moveConflict ? (
+                  <div className="bg-admin-card border border-sky-300 rounded-xl p-2.5 space-y-2">
+                    <p className="text-[11px] font-bold text-neutral-700">
+                      โต๊ะ {moveConflict} มีบิลเปิดอยู่แล้ว ({openBillsAt(moveConflict).length} บิล) ต้องการแบบไหน?
+                    </p>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <button
+                        onClick={() => mergeBillInto(moveConflict)}
+                        className="bg-sky-600 hover:bg-sky-700 text-white font-bold py-2 rounded-lg text-[11px] transition"
+                      >
+                        รวมเป็นบิลเดียว
+                      </button>
+                      <button
+                        onClick={() => moveBillTo(moveConflict)}
+                        className="bg-admin-field hover:bg-neutral-100 border text-neutral-700 font-bold py-2 rounded-lg text-[11px] transition"
+                      >
+                        ย้ายแบบแยกบิล
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => setMoveConflict('')}
+                      className="w-full text-[10px] text-neutral-500 hover:text-neutral-700 font-bold py-1"
+                    >
+                      เลือกโต๊ะอื่น
+                    </button>
+                    <p className="text-[10px] text-neutral-400 leading-normal">
+                      รวมบิล = รายการอาหารทั้งหมดไปอยู่ในบิลเดียว จ่ายทีเดียวจบ (ใช้เลขที่บิลของโต๊ะปลายทาง)
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-sky-700/80">
+                    สีเหลือง = โต๊ะนั้นมีบิลที่ยังไม่ชำระอยู่ (กดแล้วจะถามว่ารวมบิลไหม) · เมื่อย้ายแล้ว หน้าจอของลูกค้าที่โต๊ะเดิมจะเปลี่ยนเป็นเลขโต๊ะใหม่ให้เอง
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* EDIT BILL ITEMS */}
             <div className="divide-y divide-neutral-100 max-h-56 overflow-y-auto">
