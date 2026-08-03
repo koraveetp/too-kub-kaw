@@ -114,9 +114,12 @@ function readSession() {
 }
 
 // A customer arrives via a table link. Three URL shapes are accepted:
+//   ?table=N       → table N, shift decided by the Bangkok clock (shiftNow())
 //   ?table-day=N   → table N, shift LOCKED to the day storefront
 //   ?table-night=N → table N, shift LOCKED to the night bar
-//   ?table=N       → table N, shift decided by the clock (shiftNow())
+// ?table=N is what the printed table stickers carry (one per table). The two
+// locked shapes are kept for stickers printed before the switch, and for
+// hand-made links when a shop wants to pin a table to one menu.
 // Returns { table:Number, shift:'day'|'night'|null } or null when none is
 // present (null shift means "let the clock decide"). This is the single source
 // of truth for how a QR scan maps to a table + shift.

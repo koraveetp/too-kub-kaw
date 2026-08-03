@@ -95,7 +95,7 @@ pg_dump "postgres://USER:PASS@localhost:5432/restaurant" \
 
 ```bash
 psql "PASTE_DATABASE_PUBLIC_URL_HERE" \
-  -f menu_schema.sql -f orders_schema.sql -f stock_schema.sql
+  -f schema/menu_schema.sql -f schema/orders_schema.sql -f schema/stock_schema.sql
 ```
 
 (The `orders` table also auto-creates on first boot, but loading all three is
@@ -117,11 +117,15 @@ In the **app service → Variables**, add:
 DATABASE_URL     = ${{Postgres.DATABASE_URL}}
 DATA_DIR         = /data
 ALLOWED_ORIGINS  = https://YOUR-APP.up.railway.app
+AUTH_SECRET      = <paste output of: openssl rand -hex 32>
 ```
 
 - `DATABASE_URL` — the `${{Postgres.DATABASE_URL}}` reference points at the DB you
   made in Step 3, over Railway's private network (no SSL setup needed).
 - `DATA_DIR = /data` — tells the app to store the file + photos on the Volume.
+- `AUTH_SECRET` — signs staff session tokens. MUST be set and stable: if it's
+  missing the app generates a random one at boot, so **every redeploy logs out
+  all staff**. Generate once with `openssl rand -hex 32` and never change it.
 - `ALLOWED_ORIGINS` — your app rejects requests from web addresses it doesn't
   recognize. It must include your own public address, or logins and orders fail
   with a 403. You get the real address in Step 7 — set a placeholder now, fix it

@@ -7,16 +7,33 @@
 // order on the night board, no matter the wall clock. This lets staff screen
 // the order board by shift and get notified only for the shift they work.
 //
-// The clock helpers below are kept only as a fallback for legacy orders saved
-// before `type` existed:
+// The clock helpers below decide the shift for a table QR scan (a plain
+// ?table=N link opens whichever shop is running right now), and are also the
+// fallback for legacy orders saved before `type` existed:
 //
 //   day   = 06:00–17:59
 //   night = 18:00–05:59
 // ---------------------------------------------------------------------------
 
+// The line is drawn on Bangkok time, not the device clock. The shop is in
+// Thailand, but the phone scanning the QR need not be set to Thai time — a
+// tourist's handset still on its home timezone would otherwise be handed the
+// day menu at 20:00 Bangkok, and its order would land on the wrong board.
+const BANGKOK_HOUR = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'Asia/Bangkok',
+  hour: 'numeric',
+  // h23 explicitly: `hour12: false` renders midnight as "24" on some engines.
+  hourCycle: 'h23',
+});
+
+// The hour (0–23) it is in Thailand at the given moment.
+export function bangkokHour(date = new Date()) {
+  return Number(BANGKOK_HOUR.format(date));
+}
+
 // Which shift does a given Date fall in?
 export function shiftFromDate(date) {
-  const hour = date.getHours();
+  const hour = bangkokHour(date);
   return hour >= 6 && hour < 18 ? 'day' : 'night';
 }
 

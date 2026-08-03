@@ -1628,11 +1628,17 @@ function StaffView({
 
                         {/* Per-item quantity controls, one row: + · +1 · -1 — equal
                             squares so they stay compact and leave the name its
-                            width (persists to stock_items) */}
+                            width (persists to stock_items)
+
+                            The + square is near-black by day; at night that
+                            reads as a hole in the card, so it flips to amber
+                            with dark glyph. Written as a dark: override on this
+                            button alone rather than the shared --c-ctl token,
+                            so no other solid button moves. */}
                         <div className="flex items-center gap-1">
                           <button
                             onClick={() => askAddAmount(item)}
-                            className="w-8 h-8 flex items-center justify-center bg-neutral-900 hover:bg-black text-white font-bold rounded-lg text-sm leading-none transition"
+                            className="w-8 h-8 flex items-center justify-center bg-neutral-900 hover:bg-black text-white dark:bg-[#E5A63F] dark:hover:bg-[#D2932C] dark:text-[#1A120B] font-bold rounded-lg text-sm leading-none transition"
                             title="กรอกจำนวนที่ต้องการเพิ่ม"
                           >
                             +
