@@ -1,0 +1,379 @@
+// ---------------------------------------------------------------------------
+// Order helpers — bill merging & rounds
+// ---------------------------------------------------------------------------
+// While a table has not checked out yet, every additional order it sends to the
+// kitchen is folded into that table's ONE open bill instead of starting a
+// separate one. Each batch of items keeps a `round` number so the ticket can
+// draw a divider between "the first order" and "ordered more later".
+//
+// A bill is considered OPEN (mergeable) when it is the same table, the same
+// shift, and not yet paid or cancelled — the same predicate the table-status
+// and customer-session views use.
+// ---------------------------------------------------------------------------
+
+import { orderShift, workdayKey } from './shift';
+
+// An item with no `round` (placed before this feature, or the very first batch)
+// counts as round 1.
+export function itemRound(item) {
+  return item?.round || 1;
+}
+
+// ---------------------------------------------------------------------------
+// Non-seated order channels (Grab / กลับบ้าน)
+// ---------------------------------------------------------------------------
+// A seated table keeps ONE open bill and every later order merges into it as
+// the next round — that is right for โต๊ะ 5, where the same people are still
+// sitting there.
+//
+// Delivery and takeaway are not that. Two Grab riders arriving in the same
+// minute are two unrelated customers who merely share a "table" name, and
+// folding them into one bill mixes their food together. So these channels are
+// SINGLE-ROUND: every order opens its own numbered bill — Grab#1, Grab#2 —
+// which is what keeps the two apart on the board, on the kitchen ticket and on
+// the slip.
+//
+// Two things deliberately do NOT change:
+//   * the items are stamped exactly like a table's, so they join the same
+//     name-based batches on the cook's board;
+//   * adding to one of these bills afterwards is still possible — but only as
+//     a deliberate act through the แก้ไขบิล editor, never silently by a second
+//     order arriving.
+export const GRAB_TABLE = 'Grab';
+export const TAKEAWAY_TABLE = 'กลับบ้าน';
+export const SINGLE_ROUND_TABLES = [GRAB_TABLE, TAKEAWAY_TABLE];
+
+// The channel a table value belongs to, or null for a seated table:
+//   'Grab' | 'Grab#2' -> 'Grab' ;  'กลับบ้าน#3' -> 'กลับบ้าน' ;  '5' -> null
+export function singleRoundBase(table) {
+  const base = String(table ?? '').split('#')[0].trim();
+  return SINGLE_ROUND_TABLES.includes(base) ? base : null;
+}
+
+// True once a channel table already carries its ticket number ('Grab#2'), so a
+// second pass never renumbers a bill that has one.
+export function isNumberedChannel(table) {
+  return !!singleRoundBase(table) && String(table).includes('#');
+}
+
+// The next free ticket number for `base`, e.g. 'Grab#3'.
+//
+// Numbering restarts each working day and is counted per shift, so the night
+// side does not continue the day side's run. Paid and cancelled bills still
+// count: reusing #1 the moment #1 is settled would put two different Grab#1
+// bills in the same day's history, which is exactly the mix-up this is here to
+// prevent.
+export function nextSingleRoundTable(orders, base, newOrder) {
+  const shift = orderShift(newOrder);
+  const day = workdayKey(newOrder.createdAt ? new Date(newOrder.createdAt) : new Date());
+
+  let highest = 0;
+  for (const o of orders || []) {
+    if (singleRoundBase(o.table) !== base) continue;
+    if (orderShift(o) !== shift) continue;
+    if (!o.createdAt || workdayKey(new Date(o.createdAt)) !== day) continue;
+    // A legacy bill saved as plain 'กลับบ้าน' (before numbering existed) counts
+    // as #1, so the next one becomes #2 rather than colliding with it.
+    const n = Number.parseInt(String(o.table).split('#')[1], 10) || 1;
+    if (n > highest) highest = n;
+  }
+  return `${base}#${highest + 1}`;
+}
+
+// How a table reads on screen. A seated table gets the "โต๊ะ" prefix; a channel
+// ticket is already self-describing ("Grab#2"), and "โต๊ะ Grab#2" would be a
+// contradiction.
+export function tableLabel(table) {
+  return singleRoundBase(table) ? String(table) : `โต๊ะ ${table}`;
+}
+
+// ---------------------------------------------------------------------------
+// Checkout / billing lifecycle (เช็กบิล)
+// ---------------------------------------------------------------------------
+// While a bill is open a table can keep ordering. Once เช็กบิล starts, the bill
+// moves through two stages before it is finally settled (paid):
+//   'requested' — the customer tapped เช็กบิล on their phone; ordering is LOCKED
+//                 and the staff board shows "โต๊ะ X ขอเช็กบิล" so they know to
+//                 print the bill (and grab the ถุงเงิน phone for คนละครึ่ง).
+//   'printed'   — staff printed the receipt; only now do the "ประเภทเงินที่ได้รับ
+//                 จริง" buttons (เงินสด / สแกน QR / คนละครึ่ง) appear on the card.
+// Picking a money type settles the bill (status 'paid') and frees the table.
+//
+// `type` records which checkout the customer chose so staff know whether to
+// bring the ถุงเงิน phone: 'normal' (เงินสด/QR ร้าน) | 'split' (คนละครึ่ง).
+export const CHECKOUT_TYPE_LABELS = {
+  normal: 'เช็กบิลปกติ',
+  split: 'เช็กบิลคนละครึ่ง',
+};
+
+// The actual money the shop received, chosen by staff at settle time. This is
+// what the owner's reports split the takings by.
+export const PAY_METHOD_LABELS = {
+  cash: 'เงินสด',
+  qr: 'สแกน QR',
+  split: 'คนละครึ่ง',
+};
+
+// The current checkout stage of a bill, or null when it is still open.
+export function checkoutStage(order) {
+  return order?.checkout?.stage || null;
+}
+
+// A bill is "in checkout" (customer ordering must be locked) once เช็กบิล has
+// been requested or the receipt has been printed — but not once it is paid.
+export function isCheckoutLocked(order) {
+  const s = checkoutStage(order);
+  return s === 'requested' || s === 'printed';
+}
+
+// ---------------------------------------------------------------------------
+// Per-item lifecycle (5 states)
+// ---------------------------------------------------------------------------
+// Every dish on a bill moves through the kitchen on its own:
+//   'received'    รับออเดอร์  — just landed (drinks live here until served)
+//   'in_kitchen'  อยู่ในครัว  — on the kitchen board, waiting to be batched/cooked
+//   'in_progress' กำลังทำ     — the cook has started it (batch is locked)
+//   'completed'   เสร็จแล้ว   — cooked & done; leaves the kitchen board here
+//   'served'      เสิร์ฟแล้ว  — delivered to the table (tracked on the order board)
+// เช็กบิล (paid) stays a whole-bill state, set when the table checks out.
+//
+// Food skips 'received': it is auto-placed on the kitchen board ('in_kitchen')
+// the moment the order is sent. Drinks never reach the kitchen, so they sit at
+// 'received' until staff mark them 'served' from the order-taking tab.
+export const ITEM_STATUSES = ['received', 'in_kitchen', 'in_progress', 'completed', 'served'];
+
+// Kept for backwards-compatible imports; the order-taking tab now builds a
+// context-specific flow via statusFlowFor().
+export const ITEM_STATUS_FLOW = ITEM_STATUSES;
+
+// The statuses that put a dish on the kitchen board. A dish drops off the board
+// the moment it is marked 'completed' (เสร็จแล้ว) — delivery/serving is then
+// tracked on the order board, not here.
+export const KITCHEN_STATUSES = ['in_kitchen', 'in_progress'];
+
+export const ITEM_STATUS_LABELS = {
+  received: 'รับออเดอร์',
+  in_kitchen: 'อยู่ในครัว',
+  in_progress: 'กำลังทำ',
+  completed: 'เสร็จแล้ว',
+  served: 'เสิร์ฟแล้ว',
+};
+
+export const ITEM_STATUS_COLORS = {
+  received: 'bg-[#FDECC8] text-[#8a5a00]',
+  in_kitchen: 'bg-[#DCE9F7] text-[#2F5D8A]',
+  in_progress: 'bg-[#E6DAF7] text-[#5B3A9A]',
+  completed: 'bg-[#DCEFE0] text-[#2C6E49]',
+  // Light brown, NOT another green: 'completed' (เสร็จแล้ว, off the kitchen board)
+  // and 'served' (เสิร์ฟแล้ว, on the table) are two different things, and the two
+  // near-identical greens they used to share made the board unreadable at a glance.
+  served: 'bg-[#EADBC8] text-[#6B4A2B]',
+};
+
+// Is this order line a drink? Drinks are filtered off the kitchen board and
+// have a shorter lifecycle. Uses the `group` stamped at order time; older items
+// without it read as food (the safe default — food never gets wrongly hidden).
+export function isDrinkItem(item) {
+  return item?.group === 'drink';
+}
+
+// Section headings (the menu's หัวข้อ, exposed as `category`) whose items are
+// handed to the table as-is and never cooked — cold towels, desserts, pre-packed
+// snacks. Like drinks they skip the kitchen board and take the shorter
+// received -> served lifecycle. kitchen.js imports this same set from here.
+export const NON_KITCHEN_HEADINGS = new Set(['ผ้าเย็น', 'ของหวาน', 'ขนมหวาน', 'ขนมขบเคี้ยว']);
+
+// A line served straight to the table rather than cooked: every drink, plus the
+// non-kitchen headings above. These get the 2-state (received -> served) flow
+// and stay off the kitchen board. Reads the `category` stamped on the line at
+// order time; a legacy line without it falls back to the drink test alone.
+export function isServeDirectItem(item) {
+  return isDrinkItem(item) || NON_KITCHEN_HEADINGS.has(item?.category);
+}
+
+// Normalise any stored status onto the 5-state vocabulary, healing legacy rows
+// written before this feature ('new'/'cooking'). A legacy 'new' serve-direct
+// line becomes 'received'; a legacy 'new' cooked dish becomes 'in_kitchen'.
+export function normalizeItemStatus(item) {
+  const s = item?.status;
+  if (!s || s === 'new') return isServeDirectItem(item) ? 'received' : 'in_kitchen';
+  if (s === 'cooking') return 'in_progress';
+  return ITEM_STATUSES.includes(s) ? s : 'in_kitchen';
+}
+
+// Public alias — components read the normalised status through this name.
+export function itemStatus(item) {
+  return normalizeItemStatus(item);
+}
+
+// The statuses a staff member can step a single line through on the order-taking
+// tab. Drinks only ever go received -> served; food carries the full kitchen
+// chain so staff can still override the cook's board manually.
+export function statusFlowFor(item) {
+  return isServeDirectItem(item) ? ['received', 'served'] : ITEM_STATUSES.filter(s => s !== 'received');
+}
+
+// Roll the per-item statuses up into the ONE bill-level status the boards,
+// new-order chime and reports already key on ('new'/'cooking'/'served').
+// 'paid'/'cancelled' are terminal whole-bill states owned elsewhere.
+//   - all lines served                         -> 'served'
+//   - any line not yet started (received /
+//     in_kitchen)                              -> 'new'  (keeps the chime + board)
+//   - otherwise (cook has started something)    -> 'cooking'
+// Mapping in_kitchen -> 'new' is deliberate: a freshly auto-placed food order
+// must still trigger the "ออเดอร์ใหม่" chime, which fires only on bill 'new'.
+export function deriveBillStatus(items) {
+  const list = items || [];
+  if (list.length === 0) return 'new';
+  const states = list.map(normalizeItemStatus);
+  if (states.every(s => s === 'served')) return 'served';
+  if (states.some(s => s === 'received' || s === 'in_kitchen')) return 'new';
+  return 'cooking';
+}
+
+// The status a line should carry the moment it is sent: cooked food lands
+// straight on the kitchen board, serve-direct lines (drinks, cold towels,
+// desserts, snacks) wait at received.
+export function initialItemStatus(item) {
+  return isServeDirectItem(item) ? 'received' : 'in_kitchen';
+}
+
+// Stamp the fields the kitchen board needs onto a freshly-added line: a stable
+// `uid` (batch actions reference lines across bills) and its initial status.
+// Idempotent — an item that already has a uid/status keeps them.
+export function stampKitchenFields(item) {
+  return {
+    ...item,
+    uid: item.uid || ('i' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)),
+    status: item.status && item.status !== 'new' ? item.status : initialItemStatus(item),
+  };
+}
+
+// Return a copy of `order` with one item's status changed and the bill-level
+// status re-derived to match. Callers guard against paid/cancelled bills.
+export function withItemStatus(order, itemIndex, status) {
+  const items = order.items.map((it, i) => (i === itemIndex ? { ...it, status } : it));
+  return { ...order, items, status: deriveBillStatus(items) };
+}
+
+// Highest round currently on a bill.
+function maxRound(items) {
+  return (items || []).reduce((m, it) => Math.max(m, itemRound(it)), 1);
+}
+
+// Fold the whole bill `sourceId` into the bill `destId` and drop the source.
+// Used by ย้ายโต๊ะ when two groups push their tables together and ask to pay as
+// one — โต๊ะ 1 และ 2 ย้ายมารวมที่โต๊ะ 8.
+//
+// The destination bill is the one that survives, keeping its id and its เลขที่
+// bill number, so anything already printed or referenced still points at it.
+// Returns the next `orders` array (never mutates `prev`).
+export function absorbBill(prev, sourceId, destId) {
+  const source = (prev || []).find(o => o.id === sourceId);
+  const dest = (prev || []).find(o => o.id === destId);
+  if (!source || !dest || source.id === dest.id) return prev;
+
+  // The incoming rounds continue after the destination's, rather than restarting
+  // at 1 — otherwise the ticket would show two "รอบ 1" blocks and the kitchen
+  // divider would stop meaning "ordered later".
+  const offset = maxRound(dest.items);
+  const moved = (source.items || []).map(it => ({ ...it, round: itemRound(it) + offset }));
+  const items = [...(dest.items || []), ...moved];
+
+  // The merged bill STARTED when the earlier of the two groups sat down, and was
+  // last added to whenever the later of the two last ordered.
+  const startedAt = Math.min(dest.createdAt ?? Infinity, source.createdAt ?? Infinity);
+  const latest = (source.createdAt || 0) > (dest.createdAt || 0) ? source : dest;
+
+  const merged = {
+    ...dest,
+    items,
+    total: (dest.total || 0) + (source.total || 0),
+    status: deriveBillStatus(items),
+    createdAt: Number.isFinite(startedAt) ? startedAt : dest.createdAt,
+    time: latest.time || dest.time,
+    note: [dest.note, source.note].filter(Boolean).join(' | '),
+    // If either side had already asked to เช็กบิล, the merged bill stays in that
+    // state — the request does not quietly disappear because tables were joined.
+    checkout: dest.checkout || source.checkout,
+    movedFrom: [...(dest.movedFrom || []), ...(source.movedFrom || []), String(source.table)],
+    // The ids this bill has swallowed. A diner's phone follows its own bill by
+    // id, so without this trail the absorbed group's screen would lose track of
+    // its order the moment the two bills became one (see App.jsx).
+    absorbedIds: [...(dest.absorbedIds || []), ...(source.absorbedIds || []), source.id],
+    mergedAt: Date.now(),
+  };
+
+  return prev.filter(o => o.id !== sourceId).map(o => (o.id === destId ? merged : o));
+}
+
+// Fold `newOrder` into the table's existing open bill as the next round, or —
+// if the table has no open bill — add it as a fresh bill whose items are round
+// 1. Returns the next `orders` array (never mutates `prev`).
+export function mergeOrder(prev, newOrder) {
+  // Grab / กลับบ้าน never merge: each order is its own numbered bill. This runs
+  // before the lookup below, so an open Grab#1 is not a merge target at all.
+  const channel = singleRoundBase(newOrder.table);
+  if (channel) {
+    const items = newOrder.items.map(it => stampKitchenFields({
+      ...it,
+      round: 1,
+      roundAt: newOrder.createdAt,
+    }));
+    return [...prev, {
+      ...newOrder,
+      // The caller may have picked the number already (the staff take-order
+      // screen does, so its confirmation can name the bill). Only number an
+      // order that arrived as a bare 'Grab' / 'กลับบ้าน'.
+      table: isNumberedChannel(newOrder.table)
+        ? newOrder.table
+        : nextSingleRoundTable(prev, channel, newOrder),
+      items,
+      status: deriveBillStatus(items),
+    }];
+  }
+
+  const idx = prev.findIndex(o =>
+    String(o.table) === String(newOrder.table) &&
+    orderShift(o) === orderShift(newOrder) &&
+    o.status !== 'paid' &&
+    o.status !== 'cancelled'
+  );
+
+  // No open bill yet: this order opens the bill as round 1. Food lands on the
+  // kitchen board straight away ('in_kitchen'); drinks wait at 'received'.
+  if (idx === -1) {
+    const items = newOrder.items.map(it => stampKitchenFields({
+      ...it,
+      round: 1,
+      roundAt: newOrder.createdAt,
+    }));
+    return [...prev, { ...newOrder, items, status: deriveBillStatus(items) }];
+  }
+
+  // Merge into the open bill as the next round.
+  const existing = prev[idx];
+  const nextRound = maxRound(existing.items) + 1;
+  const addedItems = newOrder.items.map(it => stampKitchenFields({
+    ...it,
+    round: nextRound,
+    roundAt: newOrder.createdAt,
+  }));
+  const mergedItems = [...existing.items, ...addedItems];
+  const merged = {
+    ...existing,
+    items: mergedItems,
+    total: (existing.total || 0) + (newOrder.total || 0),
+    // New food went to the kitchen — the freshly added 'new' dishes pull the
+    // derived bill status back to 'new', reopening it so staff are alerted even
+    // if the earlier rounds were already served.
+    status: deriveBillStatus(mergedItems),
+    // Keep the original createdAt (the bill's start); refresh the "last ordered"
+    // time so the ticket footer shows the most recent round.
+    time: newOrder.time,
+    note: [existing.note, newOrder.note].filter(Boolean).join(' | '),
+  };
+  const next = [...prev];
+  next[idx] = merged;
+  return next;
+}
