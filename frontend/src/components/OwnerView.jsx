@@ -84,6 +84,17 @@ function OwnerView({
   const [staffEdit, setStaffEdit] = useState(null);
   const [savingStaff, setSavingStaff] = useState(false);
 
+  // Settings form draft. The settings fields are edited against this LOCAL copy
+  // and only committed to the shared state (which POSTs + broadcasts over SSE)
+  // when the form is saved. Binding the inputs straight to `settings`/`setSettings`
+  // fired a network write on every keystroke; the SSE echo of an earlier write
+  // would then land after later keystrokes and rewrite the field mid-typing —
+  // invisible on localhost (~0ms) but a visible character flicker once deployed.
+  // Re-seeded from `settings` only when it changes from OUTSIDE (another tab /
+  // device), which no longer happens while typing here.
+  const [settingsDraft, setSettingsDraft] = useState(settings);
+  useEffect(() => { setSettingsDraft(settings); }, [settings]);
+
   // --- ตารางที่ 3: ประวัติอัปเดตสต็อก ------------------------------------------
   // The stock_history audit trail (who moved what, when). It lives in PostgreSQL
   // rather than the shared app state, so it is fetched on demand instead of
@@ -362,6 +373,8 @@ function OwnerView({
   // --- SETTINGS FORM ACTIONS ---
   const handleSaveSettings = (e) => {
     e.preventDefault();
+    // Commit the local draft once — the single write that reaches the backend.
+    setSettings(settingsDraft);
     showToast('บันทึกข้อมูลการตั้งค่าเสร็จสมบูรณ์');
   };
 
@@ -773,8 +786,8 @@ function OwnerView({
                 <label className="block font-bold text-neutral-500 mb-1">ชื่อร้านค้า (ฝั่งกลางวัน)</label>
                 <input
                   type="text"
-                  value={settings.name}
-                  onChange={e => setSettings({ ...settings, name: e.target.value })}
+                  value={settingsDraft.name}
+                  onChange={e => setSettingsDraft({ ...settingsDraft, name: e.target.value })}
                   className="w-full border rounded-xl p-3 bg-admin-field focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold"
                   required
                 />
@@ -784,8 +797,8 @@ function OwnerView({
                 <label className="block font-bold text-neutral-500 mb-1">ชื่อร้านค้า (ฝั่งกลางคืน)</label>
                 <input
                   type="text"
-                  value={settings.nameNight || ''}
-                  onChange={e => setSettings({ ...settings, nameNight: e.target.value })}
+                  value={settingsDraft.nameNight || ''}
+                  onChange={e => setSettingsDraft({ ...settingsDraft, nameNight: e.target.value })}
                   className="w-full border rounded-xl p-3 bg-admin-field focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold"
                   required
                 />
@@ -797,8 +810,8 @@ function OwnerView({
                   type="number"
                   min="1"
                   max="100"
-                  value={settings.tables}
-                  onChange={e => setSettings({ ...settings, tables: Math.max(1, parseInt(e.target.value) || 1) })}
+                  value={settingsDraft.tables}
+                  onChange={e => setSettingsDraft({ ...settingsDraft, tables: Math.max(1, parseInt(e.target.value) || 1) })}
                   className="w-full border rounded-xl p-3 bg-admin-field focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono font-bold"
                   required
                 />
@@ -808,8 +821,8 @@ function OwnerView({
                 <label className="block font-bold text-neutral-500 mb-1">URL หลักระบบของร้าน (สำหรับสร้าง QR Code)</label>
                 <input 
                   type="text"
-                  value={settings.baseUrl}
-                  onChange={e => setSettings({ ...settings, baseUrl: e.target.value })}
+                  value={settingsDraft.baseUrl}
+                  onChange={e => setSettingsDraft({ ...settingsDraft, baseUrl: e.target.value })}
                   placeholder={window.location.origin + window.location.pathname}
                   className="w-full border rounded-xl p-3 bg-admin-field focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono text-[11px]"
                 />
@@ -819,8 +832,8 @@ function OwnerView({
                 <label className="block font-bold text-neutral-500 mb-1">เบอร์พร้อมเพย์ร้าน (สำหรับ QR รับชำระเงิน)</label>
                 <input
                   type="text"
-                  value={settings.promptpayId || ''}
-                  onChange={e => setSettings({ ...settings, promptpayId: e.target.value })}
+                  value={settingsDraft.promptpayId || ''}
+                  onChange={e => setSettingsDraft({ ...settingsDraft, promptpayId: e.target.value })}
                   placeholder="เบอร์มือถือ 10 หลัก หรือเลขบัตรประชาชน 13 หลัก"
                   className="w-full border rounded-xl p-3 bg-admin-field focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono"
                 />
