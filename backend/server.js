@@ -158,6 +158,9 @@ if (!state.payroll || typeof state.payroll !== 'object' || Array.isArray(state.p
 // One-time migration: any staff account still holding a plaintext `pass` gets
 // its password hashed and the plaintext dropped, so credentials never sit on
 // disk (or get served to a browser) in the clear again.
+// The seed's ไอดีพนักงาน (`pin`) goes the same way — hashed on first run and the
+// plaintext dropped, so the 4-digit codes are no more readable on disk than the
+// passwords are.
 function migrateStaffPasswords() {
   let changed = false;
   for (const s of state.staff || []) {
@@ -166,9 +169,14 @@ function migrateStaffPasswords() {
       delete s.pass;
       changed = true;
     }
+    if (s && s.pin !== undefined) {
+      if (s.pin && !isHashed(s.pin)) s.pinHash = hashPassword(String(s.pin));
+      delete s.pin;
+      changed = true;
+    }
   }
   if (changed) {
-    console.log('[backend] Migrated plaintext staff passwords to scrypt hashes');
+    console.log('[backend] Migrated plaintext staff passwords/PINs to scrypt hashes');
   }
 }
 migrateStaffPasswords();
@@ -183,7 +191,21 @@ fs.mkdirSync(BACKUP_DIR, { recursive: true });
 
 // Copy the current data.json aside, then prune to the newest BACKUP_KEEP files.
 // Best-effort: a backup failure must never block or crash the real write.
+//
+// Rate-limited to one snapshot a minute. copyFileSync, readdirSync and the
+// pruning unlinks are all SYNCHRONOUS: running them on every write stalls the
+// event loop — and with it every open SSE stream — once per request. On a local
+// SSD that is invisible; on a network-backed volume it is milliseconds each
+// time, and a single "เสิร์ฟครบทุกจาน" tap fires several writes. Snapshotting on
+// a timer instead keeps the recovery story (the previous good version is still
+// sitting in backups/) and actually makes the retained window LONGER, since 40
+// snapshots now span 40 minutes rather than the last few seconds of traffic.
+const BACKUP_MIN_INTERVAL_MS = 60_000;
+let lastBackupAt = 0;
+
 function backupCurrentData() {
+  if (Date.now() - lastBackupAt < BACKUP_MIN_INTERVAL_MS) return;
+  lastBackupAt = Date.now(); // set before the work, so a failure doesn't retry every write
   try {
     if (!fs.existsSync(DATA_FILE)) return; // nothing to snapshot yet (first boot)
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -270,8 +292,14 @@ function sanitizeState(s, session = null) {
   const isOwner = account?.role === 'owner';
   return {
     ...s,
+    // Password AND pin material never leave the server — not even for the owner.
+    // `hasPin` is the one thing the owner's screen needs: whether a person has a
+    // code yet, so an account that cannot sign a bill is visible at a glance.
     staff: isOwner
-      ? (s.staff || []).map(({ passHash, pass, ...rest }) => rest)
+      ? (s.staff || []).map(({ passHash, pass, pinHash, pin, ...rest }) => ({
+          ...rest,
+          hasPin: !!pinHash,
+        }))
       : [],
     timeclock: isAuthed ? s.timeclock : [],
     expenses: isOwner ? s.expenses : [],
@@ -559,7 +587,14 @@ app.get('/api/events', (req, res) => {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     Connection: 'keep-alive',
+    // Tell any reverse proxy in front of us (Railway's edge, nginx) not to
+    // buffer this response. A buffered stream holds pushes back and then
+    // delivers them in a lump, which reads as the board jumping rather than
+    // updating. There is no proxy in dev, which is why it only ever showed up
+    // in production.
+    'X-Accel-Buffering': 'no',
   });
+  res.flushHeaders?.();
   res.write(`event: state\ndata: ${JSON.stringify(sanitizeState(state, session))}\n\n`);
   // Comment ping keeps proxies/browsers from closing an idle connection.
   const ping = setInterval(() => res.write(': ping\n\n'), 25000);
@@ -602,6 +637,35 @@ app.post('/api/login', (req, res) => {
   res.json({ token, user: account.user, name: account.name, role, shop, position: account.position || '' });
 });
 
+// --- ไอดีพนักงาน (staff PIN) ------------------------------------------------
+// A 4-digit code the owner assigns to each person. It is NOT a password: it
+// opens no session and unlocks no screen. It signs an ACTION — printing a bill,
+// granting a discount — with the name of whoever was actually standing at the
+// till, so those cannot be done under someone else's name.
+//
+// Three properties make that hold:
+//   * hashed with the same scrypt helper as passwords, so data.json (and any
+//     backup of it) never carries a usable code;
+//   * never sent to a browser, and checked only here — the staff panel is not
+//     even given the staff list (see sanitizeState), so a device cannot look up
+//     a colleague's code to type it;
+//   * unique across accounts, or "whose PIN is this" would have two answers.
+const PIN_RE = /^\d{4}$/;
+
+// The account a typed PIN belongs to, or null. Scans every account because the
+// hash is salted per record — fine for a shop-sized staff list.
+function findStaffByPin(pin, staffList = state.staff) {
+  if (!PIN_RE.test(String(pin || ''))) return null;
+  return (staffList || []).find((s) => s.pinHash && verifyPassword(String(pin), s.pinHash)) || null;
+}
+
+// Is this PIN already somebody else's? `exceptUser` is the account being edited,
+// which is allowed to keep its own code.
+function pinTakenBy(pin, exceptUser) {
+  const owner = findStaffByPin(pin);
+  return owner && owner.user !== exceptUser ? owner : null;
+}
+
 // Reduce the incoming staff array to safe, hashed records. New accounts must
 // carry a plaintext `pass`; existing accounts (which arrive without one, since
 // the served state omits it) keep their stored hash. Throws on invalid input.
@@ -609,6 +673,10 @@ function normalizeStaffWrite(incoming) {
   if (!Array.isArray(incoming)) throw new Error('staff must be an array');
   const existingByUser = new Map((state.staff || []).map((s) => [s.user, s]));
   const out = [];
+  // Plaintext PINs set inside THIS write, so two accounts added in one go can't
+  // be given the same code (the stored hashes can't catch that — they are only
+  // written at the end).
+  const pinsInBatch = new Map();
   for (const raw of incoming) {
     const user = String(raw?.user || '').trim();
     const name = String(raw?.name || '').trim() || user;
@@ -636,7 +704,19 @@ function normalizeStaffWrite(incoming) {
     // accidentally granted owner access.
     const role = ['owner', 'staff'].includes(raw?.role) ? raw.role : (existing?.role || 'staff');
 
-    out.push({ user, name, passHash, position, dailyWage, shop, role });
+    // ไอดีพนักงาน: 4 digits, set by the owner. Absent means "leave it alone",
+    // so a form that doesn't touch the PIN never wipes it.
+    let pinHash = existing?.pinHash;
+    if (raw?.pin != null && String(raw.pin).trim() !== '') {
+      const pin = String(raw.pin).trim();
+      if (!PIN_RE.test(pin)) throw new Error(`ไอดีพนักงานของ "${user}" ต้องเป็นตัวเลข 4 หลัก`);
+      const clash = pinsInBatch.get(pin) ?? pinTakenBy(pin, user)?.name;
+      if (clash) throw new Error(`ไอดี ${pin} ถูกใช้โดย "${clash}" แล้ว — เลือกเลขอื่น`);
+      pinsInBatch.set(pin, name);
+      pinHash = hashPassword(pin);
+    }
+
+    out.push({ user, name, passHash, position, dailyWage, shop, role, ...(pinHash ? { pinHash } : {}) });
   }
   if (!out.length) throw new Error('at least one staff account is required');
   return out;
@@ -860,6 +940,7 @@ app.patch('/api/staff/:user', requireOwner, (req, res) => {
   const nextUser = String(req.body?.user ?? current).trim();
   const name = String(req.body?.name ?? account.name ?? '').trim();
   const pass = req.body?.pass == null ? '' : String(req.body.pass);
+  const pin = req.body?.pin == null ? '' : String(req.body.pin).trim();
   const rawWage = req.body?.dailyWage;
 
   if (!nextUser) return res.status(400).json({ error: 'ต้องระบุชื่อผู้ใช้' });
@@ -878,6 +959,19 @@ app.patch('/api/staff/:user', requireOwner, (req, res) => {
     });
   }
 
+  // A blank PIN box means "keep the current code", the same way the password
+  // box does — the form can never tell what is stored, so it must not be able to
+  // clear it by accident.
+  if (pin) {
+    if (!PIN_RE.test(pin)) {
+      return res.status(400).json({ error: 'ไอดีพนักงานต้องเป็นตัวเลข 4 หลัก' });
+    }
+    const clash = pinTakenBy(pin, current);
+    if (clash) {
+      return res.status(409).json({ error: `ไอดี ${pin} ถูกใช้โดย "${clash.name}" แล้ว — เลือกเลขอื่น` });
+    }
+  }
+
   let dailyWage = account.dailyWage || 0;
   if (rawWage !== undefined && rawWage !== null && rawWage !== '') {
     const n = Number(rawWage);
@@ -890,6 +984,7 @@ app.patch('/api/staff/:user', requireOwner, (req, res) => {
   account.name = name || nextUser;
   account.dailyWage = dailyWage;
   if (pass) account.passHash = hashPassword(pass); // blank = keep the old one
+  if (pin) account.pinHash = hashPassword(pin);
 
   if (nextUser !== current) {
     account.user = nextUser;
@@ -916,6 +1011,59 @@ app.patch('/api/staff/:user', requireOwner, (req, res) => {
   broadcast();
   console.log(`[backend] Staff account "${current}" updated${nextUser !== current ? ` (renamed to "${nextUser}")` : ''}`);
   res.json({ ok: true, user: account.user, name: account.name, dailyWage: account.dailyWage });
+});
+
+// Who is holding the till right now? Takes a 4-digit ไอดีพนักงาน and answers
+// with the account it belongs to, so the staff panel can stamp a printed bill
+// (or a discount) with a name it did not have to be told.
+//
+// Signing in is still required — this endpoint identifies a PERSON on an
+// already-authenticated device, it does not authenticate the device. A wrong
+// PIN is answered 401 with nothing else: no hint about which codes exist.
+//
+// Guessing is the obvious attack (there are only 10,000 codes), so failures are
+// counted per IP and the door shuts long before a run through them; a correct
+// PIN clears the count, so ordinary mistyping at a busy till never locks staff
+// out for long.
+const PIN_WINDOW_MS = 10 * 60 * 1000;
+const PIN_MAX_ATTEMPTS = 15;
+const pinAttempts = new Map(); // ip -> { count, first }
+
+function pinRateLimited(ip) {
+  const now = Date.now();
+  const rec = pinAttempts.get(ip);
+  if (!rec || now - rec.first > PIN_WINDOW_MS) {
+    pinAttempts.set(ip, { count: 1, first: now });
+    return false;
+  }
+  rec.count += 1;
+  return rec.count > PIN_MAX_ATTEMPTS;
+}
+
+app.post('/api/staff/verify-pin', requireAuth, (req, res) => {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  if (pinRateLimited(ip)) {
+    return res.status(429).json({ error: 'ใส่ไอดีผิดหลายครั้งเกินไป กรุณารอสักครู่' });
+  }
+  // An existing shop upgrading to this feature has no codes yet, and "ไอดีไม่
+  // ถูกต้อง" would send staff hunting for a number nobody has been given. Say
+  // what is actually wrong, and who can fix it.
+  if (!(state.staff || []).some((s) => s.pinHash)) {
+    return res.status(409).json({
+      error: 'ยังไม่มีการตั้งไอดีพนักงานในระบบ — ให้เจ้าของร้านตั้งที่ "จัดการสิทธิ์พนักงาน" ก่อน',
+    });
+  }
+  const account = findStaffByPin(String(req.body?.pin || '').trim());
+  if (!account) {
+    return res.status(401).json({ error: 'ไอดีพนักงานไม่ถูกต้อง' });
+  }
+  pinAttempts.delete(ip); // a correct code means this till is not being probed
+  res.json({
+    user: account.user,
+    name: account.name,
+    role: account.role === 'owner' ? 'owner' : 'staff',
+    position: account.position || '',
+  });
 });
 
 // Manually re-pull the menu from the database (e.g. after editing it directly

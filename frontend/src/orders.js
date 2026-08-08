@@ -127,6 +127,82 @@ export function isCheckoutLocked(order) {
 }
 
 // ---------------------------------------------------------------------------
+// ส่วนลด — a discount as the last line of the bill
+// ---------------------------------------------------------------------------
+// A discount is not a separate field on the order; it is a LINE, with a negative
+// price, sitting at the end of the items. That choice carries its weight:
+// everything that already sums a bill — the board card, the customer's phone,
+// the printed slip, the owner's reports — arrives at the discounted number
+// without knowing this feature exists.
+//
+// The line is stamped 'served' so it stays off the kitchen board and never holds
+// up เช็กบิล (see unservedItems), carries no stockRef so it touches no stock, and
+// records `by` — the staff member whose ไอดี unlocked it — so a discount can
+// always be traced to a person.
+//
+// A bill holds at most ONE discount: applying another replaces it, so the
+// percentage on screen is always the percentage in force.
+export function isDiscountItem(item) {
+  return item?.kind === 'discount';
+}
+
+// What the percentage applies to: everything on the bill except a discount
+// already on it (otherwise a second discount would compound on the first).
+export function discountBase(items) {
+  return (items || [])
+    .filter(it => !isDiscountItem(it))
+    .reduce((sum, it) => sum + ((it.price || 0) + (it.addonCost || 0)) * (it.qty || 0), 0);
+}
+
+// The baht a `percent` discount takes off `items`, rounded to whole baht — a
+// till hands over notes and coins, not satang, and a slip reading -฿84.50 is a
+// number nobody can actually pay.
+export function discountAmount(items, percent) {
+  return Math.round(discountBase(items) * (Number(percent) || 0) / 100);
+}
+
+// Put `percent` off onto a bill (or replace the discount it already has), and
+// re-total it. `by` is the name of the person who authorised it.
+// Returns the next order object; never mutates `order`.
+export function withDiscount(order, percent, by) {
+  const pct = Math.max(0, Math.min(100, Number(percent) || 0));
+  const kept = (order.items || []).filter(it => !isDiscountItem(it));
+  const amount = discountAmount(kept, pct);
+  const items = pct > 0 && amount > 0
+    ? [...kept, {
+        name: `ส่วนลด ${pct}%`,
+        nameEn: `Discount ${pct}%`,
+        kind: 'discount',
+        percent: pct,
+        qty: 1,
+        price: -amount,
+        addonCost: 0,
+        // Off the kitchen board and past the serving gate from the moment it
+        // exists — a discount is not something anybody cooks or carries out.
+        status: 'served',
+        // Rides with the bill's current last round so it never draws a stray
+        // "สั่งเพิ่ม รอบที่ N" divider above itself.
+        round: (kept || []).reduce((m, it) => Math.max(m, itemRound(it)), 1),
+        by: by || '',
+        at: Date.now(),
+        uid: 'disc' + Date.now().toString(36),
+      }]
+    : kept;
+
+  return {
+    ...order,
+    items,
+    total: items.reduce((sum, it) => sum + ((it.price || 0) + (it.addonCost || 0)) * (it.qty || 0), 0),
+    status: deriveBillStatus(items),
+  };
+}
+
+// The discount currently on a bill, or null.
+export function billDiscount(order) {
+  return (order?.items || []).find(isDiscountItem) || null;
+}
+
+// ---------------------------------------------------------------------------
 // Per-item lifecycle (5 states)
 // ---------------------------------------------------------------------------
 // Every dish on a bill moves through the kitchen on its own:
@@ -231,6 +307,29 @@ export function deriveBillStatus(items) {
   return 'cooking';
 }
 
+// ---------------------------------------------------------------------------
+// The serving gate — เช็กบิลได้เมื่อเสิร์ฟครบทุกจานแล้วเท่านั้น
+// ---------------------------------------------------------------------------
+// A bill cannot enter checkout (customer เช็กบิล, staff พิมพ์บิล) while any dish
+// is still on its way: a slip printed mid-service either charges for food that
+// never arrived or misses a dish added while the printer was warming up. Both
+// the phone and the staff board ask through here, so the rule is one rule.
+//
+// Takes a single bill or an array of them (a table can hold several open bills,
+// and the customer's เช็กบิล settles all of them at once).
+export function unservedItems(bills) {
+  return (Array.isArray(bills) ? bills : [bills])
+    .flatMap(o => o?.items || [])
+    .filter(it => normalizeItemStatus(it) !== 'served');
+}
+
+// True once every line on these bills is เสิร์ฟแล้ว — the precondition for
+// printing a receipt. Callers pass open bills only; paid/cancelled ones are
+// already past this gate.
+export function isFullyServed(bills) {
+  return unservedItems(bills).length === 0;
+}
+
 // The status a line should carry the moment it is sent: cooked food lands
 // straight on the kitchen board, serve-direct lines (drinks, cold towels,
 // desserts, snacks) wait at received.
@@ -304,7 +403,14 @@ export function absorbBill(prev, sourceId, destId) {
     mergedAt: Date.now(),
   };
 
-  return prev.filter(o => o.id !== sourceId).map(o => (o.id === destId ? merged : o));
+  // Both halves may have carried a ส่วนลด. The bill that survives keeps ITS
+  // terms, re-struck over the joined subtotal — one bill can only have one
+  // discount, and the surviving bill's is the one already printed against the
+  // number the group is being asked to pay.
+  const discount = billDiscount(dest) || billDiscount(source);
+  const settled = discount ? withDiscount(merged, discount.percent, discount.by) : merged;
+
+  return prev.filter(o => o.id !== sourceId).map(o => (o.id === destId ? settled : o));
 }
 
 // Fold `newOrder` into the table's existing open bill as the next round, or —
@@ -360,6 +466,12 @@ export function mergeOrder(prev, newOrder) {
     roundAt: newOrder.createdAt,
   }));
   const mergedItems = [...existing.items, ...addedItems];
+  // A discount already on this bill has to be re-struck against the new
+  // subtotal, or a line reading "ส่วนลด 10%" would quietly stop being 10% the
+  // moment the table ordered again — and it would no longer be the last line of
+  // the bill either. The percentage and who authorised it are kept; only the
+  // baht it comes to is recomputed. See withDiscount.
+  const discount = billDiscount(existing);
   const merged = {
     ...existing,
     items: mergedItems,
@@ -374,6 +486,6 @@ export function mergeOrder(prev, newOrder) {
     note: [existing.note, newOrder.note].filter(Boolean).join(' | '),
   };
   const next = [...prev];
-  next[idx] = merged;
+  next[idx] = discount ? withDiscount(merged, discount.percent, discount.by) : merged;
   return next;
 }

@@ -57,13 +57,63 @@ The refreshed menu is broadcast to every open tab in real time.
 Each person sees exactly one panel — there is no in-app switcher:
 
 - **Customer** — reaches the menu *only* by scanning a table QR. Opening the
-  plain site URL never shows the menu; it shows the login page. Tables are
-  numbered 1–9. Three link shapes decide the shift:
+  plain site URL in a fresh tab never shows the menu; it shows the login page.
+  Tables are numbered 1–9. Three link shapes decide the shift:
   - `?table-day=N` — table N, **locked to the day** storefront
   - `?table-night=N` — table N, **locked to the night** bar
   - `?table=N` — table N, shift decided by the **clock** at scan time
 
   The staff **QR Code** tab prints a day *and* a night QR for every table.
+
+  The link is read once and then **wiped off the URL**, so the ordering page
+  cannot be re-entered from the back button or the browser's history. The seat
+  it named is kept in `sessionStorage` instead: a reload stays in the session,
+  closing the tab ends it (`frontend/src/customer-session.js`).
+
+### ไอดีพนักงาน — a 4-digit PIN per person
+
+Separate from the login password. The owner sets it when creating the account
+(จัดการสิทธิ์พนักงาน) and it must be unique across the shop. It opens no screen;
+it signs an **action** with the name of whoever is standing at the till:
+
+- **พิมพ์บิล** asks for it every single time, including พิมพ์ซ้ำ, and the name it
+  resolves to is what gets printed on the slip (`พนักงาน: …`) and kept on the
+  order as `printedBy` — so a bill cannot be printed under someone else's name.
+- **ส่วนลด** (the 🎟️ button beside แก้ไขบิล on the board) asks for it before the
+  discount is applied, and records who authorised it on the bill line itself.
+
+Codes are scrypt-hashed like passwords, never sent to a browser, and only ever
+checked by `POST /api/staff/verify-pin` — the staff panel is not even given the
+staff list, so one device cannot look up a colleague's code. Wrong codes are
+rate-limited per IP.
+
+**Upgrading an existing shop:** nobody has a PIN until the owner sets one, and
+พิมพ์บิล is blocked until they do (the till says so in as many words). Set them
+in ตั้งค่า → จัดการสิทธิ์พนักงาน before the next service.
+
+### ส่วนลด (%) as a bill line
+
+A discount is not a field on the order — it is a line at the end of the items
+with a negative price (`kind: 'discount'`), so every existing total (board card,
+diner's phone, printed slip, owner's reports) arrives at the discounted number
+on its own. It is stamped `served`, so it never reaches the kitchen board nor
+holds up เช็กบิล, and it carries no stock link.
+
+One discount per bill: applying another replaces it. Anything that changes what
+the bill contains — a new round merging in, a รวมบิล, an edit in แก้ไขบิล —
+re-strikes the same percentage over the new subtotal and moves the line back to
+the end, so "ส่วนลด 10%" on paper is always 10% of the bill it is printed on.
+
+### Paying closes the diner's session (เคลียร์ session)
+
+Once staff settle a bill, the phone that ordered it says thank-you for ten
+seconds and then locks itself out of the menu — the cart, the ย้ายโต๊ะ follow and
+the remembered bill ids are all cleared. The lock is remembered per **scanned
+table** for the rest of the working day, so re-opening or re-scanning that same
+QR lands back on the locked screen rather than a fresh menu.
+
+It is deliberately device-local: the next group sits down with their own phones,
+which have never seen that record, and they scan in exactly as normal.
 - **Staff** (`role: 'staff'`) — logs in and lands on the shift board for their
   `shop` (`day` / `night`). Cannot reach the customer or owner views.
 - **Owner** (`role: 'owner'`) — logs in and lands on the back-office board.

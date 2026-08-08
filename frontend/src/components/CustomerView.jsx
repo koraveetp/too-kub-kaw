@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { ShoppingBag, ShoppingBasket, Trash2, X, Plus, Minus, CheckCircle } from 'lucide-react';
 import { isDrinkItem, addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
-import { mergeOrder, itemRound } from '../orders';
+import { mergeOrder, itemRound, unservedItems, isDiscountItem } from '../orders';
 import { resolveImageUrl, fetchStockAvailability } from '../api';
 
 // Normalise a name for stock↔menu matching: trim, collapse inner whitespace,
@@ -311,9 +311,15 @@ const filteredMenu = menu.filter(item => item.theme === theme || item.theme === 
   const checkoutType = checkoutBill?.checkout?.type || 'normal';
   const grandTotal = tableOrders.reduce((sum, o) => sum + (o.total || 0), 0);
 
+  // เช็กบิลได้ต่อเมื่อเสิร์ฟครบทุกจาน: while a dish is still coming the total on
+  // screen is not yet what the table owes, so the button waits instead.
+  const unserved = unservedItems(tableOrders);
+  const canCheckout = unserved.length === 0;
+
   // Tap เช็กบิล → stamp every open bill on this table with the chosen checkout
   // type. This both locks ordering here and pops "โต๊ะ X ขอเช็กบิล" on staff.
   const handleRequestCheckout = (type) => {
+    if (!canCheckout) return;
     setOrders(prev => prev.map(o =>
       String(o.table) === String(tableNo) && o.status !== 'paid' && o.status !== 'cancelled'
         ? { ...o, checkout: { stage: 'requested', type, requestedAt: Date.now() } }
@@ -397,6 +403,15 @@ const filteredMenu = menu.filter(item => item.theme === theme || item.theme === 
                               <span className="h-px flex-1 bg-neutral-200 dark:bg-[#4A3A2C]" />
                             </div>
                           )}
+                          {/* A ส่วนลด staff put on the bill reads as one line off
+                              the total, not as something ordered — no quantity,
+                              and the amount in the minus it actually is. */}
+                          {isDiscountItem(item) ? (
+                            <div className="flex justify-between items-center text-xs font-bold text-rose-600 dark:text-rose-300">
+                              <span>🏷️ {t(item.name, item.nameEn)}</span>
+                              <span className="font-mono">-฿{Math.abs(item.price).toLocaleString()}</span>
+                            </div>
+                          ) : (
                           <div className="flex justify-between items-start text-xs">
                             <div>
                               <span className="font-extrabold text-amber-700 dark:text-[#E8B45C] mr-1.5">{item.qty}×</span>
@@ -410,6 +425,7 @@ const filteredMenu = menu.filter(item => item.theme === theme || item.theme === 
                             </div>
                             <span className="font-mono text-neutral-500 dark:text-[#C9B8A6]">฿{((item.price + (item.addonCost || 0)) * item.qty).toLocaleString()}</span>
                           </div>
+                          )}
                         </React.Fragment>
                       );
                     })}
@@ -461,14 +477,32 @@ const filteredMenu = menu.filter(item => item.theme === theme || item.theme === 
                 </div>
                 <button
                   onClick={() => setShowCheckoutModal(true)}
-                  className="w-full bg-cta hover:bg-cta-hover text-cta-ink font-bold py-3.5 rounded-xl transition text-sm flex items-center justify-center gap-2 shadow-md"
+                  disabled={!canCheckout}
+                  className={`w-full font-bold py-3.5 rounded-xl transition text-sm flex items-center justify-center gap-2 ${
+                    canCheckout
+                      ? 'bg-cta hover:bg-cta-hover text-cta-ink shadow-md'
+                      : 'bg-strip-soft border border-line text-ink-2 cursor-not-allowed'
+                  }`}
                 >
                   🧾 {t('เช็กบิล / ชำระเงิน', 'Check out / Pay')}
                 </button>
-                <p className="text-[11px] text-ink-2 leading-snug text-center">
-                  {t(
-                    'สามารถกดแจ้งเช็กบิลผ่านหน้าจอเพื่อให้พนักงานนำใบเสร็จมาส่ง หรือหากต้องการให้พนักงานมาให้บริการที่โต๊ะ สามารถเรียกพนักงานได้ตามปกติเช่นกัน 😊',
-                    'Tap “Check out” on screen and staff will bring your receipt to the table — or call staff over anytime if you’d like service at your table 😊'
+                {/* Why the button is asleep — without this the diner just taps a
+                    dead button and calls staff over anyway. */}
+                <p className="text-[11px] leading-snug text-center">
+                  {canCheckout ? (
+                    <span className="text-ink-2">
+                      {t(
+                        'สามารถกดแจ้งเช็กบิลผ่านหน้าจอเพื่อให้พนักงานนำใบเสร็จมาส่ง หรือหากต้องการให้พนักงานมาให้บริการที่โต๊ะ สามารถเรียกพนักงานได้ตามปกติเช่นกัน 😊',
+                        'Tap “Check out” on screen and staff will bring your receipt to the table — or call staff over anytime if you’d like service at your table 😊'
+                      )}
+                    </span>
+                  ) : (
+                    <span className="font-semibold text-amber-700 dark:text-[#E8B45C]">
+                      {t(
+                        `⏳ ยังเสิร์ฟไม่ครบ (เหลืออีก ${unserved.length} รายการ) — เช็กบิลได้เมื่ออาหารมาครบทุกจานแล้ว`,
+                        `⏳ ${unserved.length} item${unserved.length > 1 ? 's' : ''} still on the way — checkout opens once everything has been served.`
+                      )}
+                    </span>
                   )}
                 </p>
               </div>

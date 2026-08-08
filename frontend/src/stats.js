@@ -7,6 +7,7 @@
 
 import { orderShift } from './shift';
 import { isDrinkItem } from './menu-groups';
+import { isDiscountItem } from './orders';
 import { todayKey } from './expenses';
 
 // Which calendar day an order belongs to. Paid bills are counted on the day they
@@ -124,6 +125,10 @@ export function menuStats(orders, menu, shift, group = 'all', sortBy = 'qty') {
     .filter((o) => o.status !== 'cancelled' && (shift === 'all' || orderShift(o) === shift))
     .forEach((o) => {
       (o.items || []).forEach((item) => {
+        // A ส่วนลด is a line on the bill, not a dish sold: counting it here would
+        // invent a menu item with negative revenue and put it at the top of the
+        // "least sold" list.
+        if (isDiscountItem(item)) return;
         const g = lineGroup(item.name, menu);
         if (group !== 'all' && g !== group) return;
         const row = rows.get(item.name) || { name: item.name, group: g, qty: 0, revenue: 0 };

@@ -3,6 +3,7 @@ import CustomerView from './components/CustomerView';
 import StaffView from './components/StaffView';
 import OwnerView from './components/OwnerView';
 import LoginPage from './components/LoginPage';
+import SessionClosed from './components/SessionClosed';
 import { fetchState, saveResource, subscribeToState, login, setAuthToken } from './api';
 import { shiftNow } from './shift';
 import { normalizeGroupStore } from './menu-groups';
@@ -13,7 +14,19 @@ import {
   writeTableFollow,
   readSeenBills,
   writeSeenBills,
+  clearSeating,
 } from './table-follow';
+import {
+  readClosedSession,
+  writeClosedSession,
+  clearClosedSession,
+  closedSessionFor,
+  isSameSeat,
+  readSeat,
+  writeSeat,
+  clearSeat,
+  stripTableParams,
+} from './customer-session';
 import { ShieldCheck, Key, LogOut, Sun, Moon, Smartphone, Languages, ChevronDown } from 'lucide-react';
 import logoImg from './assets/logo.jpg';
 
@@ -138,14 +151,32 @@ function readTableParam() {
   return null;
 }
 
+// Where this tab is seated: the QR link it has just been opened with, or — once
+// that link has been wiped off the URL (see stripTableParams) — the seat kept in
+// sessionStorage. Everything that used to read the URL param goes through here,
+// so cleaning the address bar changes nothing about how the app behaves.
+function readSeating() {
+  const tp = readTableParam();
+  if (tp) return { ...tp, scanned: true };
+  const seat = readSeat();
+  return seat ? { table: seat.table, shift: seat.shift, scanned: false } : null;
+}
+
+// The number printed on the QR this phone scanned — the anchor a ย้ายโต๊ะ follow
+// and the เช็กบิล lock both hang off. Read from the seat, so it survives both a
+// reload and the cleaned URL.
+function scanAnchor() {
+  return readSeating()?.table ?? null;
+}
+
 function App() {
   const [theme, setTheme] = useState(() => {
     // A customer arriving via a table QR is pinned to their shift from the very
     // first frame — so a day diner never flashes the night palette (or vice-
     // versa) from a stale saved theme. An explicit ?table-day / ?table-night
     // link fixes the shift; a plain ?table falls back to the clock.
-    const tp = readTableParam();
-    if (tp) return tp.shift || shiftNow();
+    const seating = readSeating();
+    if (seating) return seating.shift || shiftNow();
     return localStorage.getItem('activeTheme') || 'day';
   });
   // The active screen. Access is decided up-front, not switchable at will:
@@ -154,19 +185,44 @@ function App() {
   //   • everyone else lands on the 'login' page.
   // This is what keeps each role boxed into its own view — there is no dropdown
   // to hop between them anymore.
+  //
+  // A seat held in sessionStorage counts as a scan for as long as the tab lives
+  // — that is what lets the QR link be wiped from the URL without a reload
+  // dropping the diner back onto the login page.
   const [role, setRole] = useState(() => {
-    if (readTableParam()) return 'customer';
+    if (readSeating()) return 'customer';
     const session = readSession();
     if (session?.role) return session.role === 'owner' ? 'owner' : 'staff';
     return 'login';
   });
   const [tableNo, setTableNo] = useState(() => {
-    const tp = readTableParam();
+    const seating = readSeating();
     // A phone that was re-seated resumes at its new table straight away, so a
     // refresh never flashes (or sticks on) the number printed on the old QR.
-    if (tp) return tableForScan(tp.table);
+    if (seating) return tableForScan(seating.table);
     return parseInt(localStorage.getItem('tableNo') || '1');
   });
+  // The diner's session is over once their bill has been settled: the phone
+  // shows the thank-you/locked screen instead of the menu, and stays that way
+  // for the rest of the working day (see customer-session.js). Restored from
+  // localStorage so a reload — or re-opening the same QR link — lands back on
+  // the lock rather than on a fresh menu.
+  const [closedSession, setClosedSession] = useState(() => {
+    const rec = readClosedSession();
+    if (!rec) return null;
+    const tp = readTableParam();
+    // A QR for a DIFFERENT table is a different seat, so the old lock has no
+    // say over it — this phone is scanning in somewhere new.
+    if (tp && !isSameSeat(rec, tp.table)) {
+      clearClosedSession();
+      return null;
+    }
+    return rec;
+  });
+  // Mirrored for the seating effect, which must stop resolving (and stop
+  // remembering bills) the moment the session closes.
+  const closedSessionRef = useRef(closedSession);
+  useEffect(() => { closedSessionRef.current = closedSession; }, [closedSession]);
   // Customer-facing menu language ('th' | 'en'). Only the customer view reads
   // it; staff and owner panels stay Thai. Persisted so a foreign diner's choice
   // survives a page reload.
@@ -206,6 +262,44 @@ function App() {
   useEffect(() => { staffRef.current = staff; }, [staff]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
+  // --- Echo guard: why the board used to flicker on a slow link -------------
+  // Every write is answered by an SSE push of the WHOLE state, and that push
+  // comes back to the tab that made the write as well. One tap can fire more
+  // than one write — "เสิร์ฟครบทุกจาน" saves `stock` and `orders` together —
+  // and the first write's echo is a snapshot the server took BEFORE the second
+  // one landed. Applying it puts the board back the way it was until the second
+  // echo arrives. On localhost that gap is a millisecond and nobody sees it;
+  // over the internet (Railway) it is a few hundred, which is exactly the
+  // กระตุก staff were seeing.
+  //
+  // So: while this tab has a write to a resource in flight, an incoming push is
+  // not allowed to touch THAT resource — our own optimistic value is the newer
+  // one by definition. The short tail after the response covers an echo that
+  // was already on the wire when the server processed our write.
+  //
+  // Dropping a push is safe but not free: it might have carried a change made on
+  // ANOTHER device (a diner ordering while we tap). So a dropped push is
+  // remembered, and once our own writes have settled we re-read the state from
+  // the server — a fresh read, never the stale snapshot we threw away.
+  const ECHO_SETTLE_MS = 400;
+  const writesInFlight = useRef({});
+  const missedPush = useRef({});
+  const applyStateRef = useRef(null);
+  const isWriting = (resource) => (writesInFlight.current[resource] || 0) > 0;
+
+  // The last payload we applied (or sent) for each resource, serialised. A push
+  // carries everything, so without this every push hands React brand-new arrays
+  // for the menu, the orders and the rest — re-rendering the whole app even when
+  // nothing about them changed. Comparing here lets an unchanged resource keep
+  // its identity, and React skips the render entirely.
+  const appliedRef = useRef({});
+  const isNewPayload = (resource, value) => {
+    const json = JSON.stringify(value);
+    if (appliedRef.current[resource] === json) return false;
+    appliedRef.current[resource] = json;
+    return true;
+  };
+
   // Wrapped setters: update this tab immediately (optimistic) AND push the new
   // value to the backend, which broadcasts it to all other tabs. They accept
   // either a value or an updater function, exactly like a useState setter, so
@@ -215,15 +309,27 @@ function App() {
       const next = typeof updater === 'function' ? updater(ref.current) : updater;
       ref.current = next;
       setLocal(next);
+      // Record what we sent, so the echo of our own write reads as "nothing
+      // new" and costs no re-render at all.
+      isNewPayload(resource, next);
+      writesInFlight.current[resource] = (writesInFlight.current[resource] || 0) + 1;
       // A 401 means our staff session expired — drop it and ask to log in again.
-      saveResource(resource, next, handleSessionExpired);
+      saveResource(resource, next, handleSessionExpired).finally(() => {
+        setTimeout(() => {
+          writesInFlight.current[resource] = Math.max(0, (writesInFlight.current[resource] || 0) - 1);
+          if (isWriting(resource) || !missedPush.current[resource]) return;
+          // We ignored someone else's push while writing — catch up for real.
+          missedPush.current[resource] = false;
+          fetchState().then((s) => applyStateRef.current?.(s)).catch(() => {});
+        }, ECHO_SETTLE_MS);
+      });
     };
   const setOrders = useCallback(makeSetter('orders', setOrdersLocal, ordersRef), []);
   const setStock = useCallback(makeSetter('stock', setStockLocal, stockRef), []);
   const setStaff = useCallback(makeSetter('staff', setStaffLocal, staffRef), []);
   const setSettings = useCallback(makeSetter('settings', setSettingsLocal, settingsRef), []);
   const setExpenses = useCallback(makeSetter('expenses', setExpensesLocal, expensesRef), []);
-  
+
   // App UX States
   const [cart, setCart] = useState([]);
   const [activeStaffUser, setActiveStaffUser] = useState(() => readSession()?.user || null);
@@ -321,6 +427,8 @@ function App() {
     // Wait for the real orders to arrive. `orders` starts as [] on every load,
     // and resolving against that empty list would forget every remembered bill.
     if (loadState !== 'ready') return;
+    // Session already closed: this phone no longer follows anything.
+    if (closedSessionRef.current) return;
     if (!seenBillsRef.current) seenBillsRef.current = readSeenBills();
 
     // The first pass after a (re)load is catching up on a move that already
@@ -330,12 +438,37 @@ function App() {
     firstSyncRef.current = false;
 
     const seen = seenBillsRef.current;
-    const scan = readTableParam();
+    // The QR's own number, from the seat rather than the URL (which has been
+    // cleaned by now — see stripTableParams).
+    const scanTable = scanAnchor();
+
+    // --- ปิดโต๊ะแล้ว: จบเซสชัน ------------------------------------------------
+    // Staff have taken payment for a bill this phone was sitting with, so the
+    // session ends here — before resolveSeating runs, because that call prunes
+    // the very ids this test reads (a settled bill must not keep steering a
+    // phone anywhere). Everything the session knew is wiped: the follow, the
+    // remembered bills and whatever was left in the cart.
+    const closed = closedSessionFor({
+      orders,
+      seen,
+      table: tableNo,
+      scanTable,
+    });
+    if (closed) {
+      writeClosedSession(closed);
+      setClosedSession(closed);
+      closedSessionRef.current = closed;
+      clearSeating();
+      seenBillsRef.current = new Set();
+      setCart([]);
+      return;
+    }
+
     const before = readTableFollow();
     const { table, follow, moved } = resolveSeating({
       orders,
       currentTable: tableNo,
-      scanTable: scan?.table ?? null,
+      scanTable,
       seen,
       follow: before,
     });
@@ -354,21 +487,36 @@ function App() {
   // server re-scopes what it returns (an owner then starts receiving the gated
   // expenses/payroll/time-clock data; a logout drops back to the public slice).
   useEffect(() => {
+    // Adopt one resource out of a pushed snapshot — but never one this tab is
+    // still writing (that snapshot predates our own change), and never one that
+    // has not actually changed (see the two refs above).
+    const adopt = (resource, value, setLocal, transform) => {
+      if (!value) return;
+      if (isWriting(resource)) {
+        missedPush.current[resource] = true;
+        return;
+      }
+      if (!isNewPayload(resource, value)) return;
+      setLocal(transform ? transform(value) : value);
+    };
     const applyState = (s) => {
-      if (s.orders) setOrdersLocal(s.orders);
-      if (s.menu) setMenuLocal(s.menu);
-      if (s.stock) setStockLocal(s.stock);
-      if (s.staff) setStaffLocal(s.staff);
-      if (s.settings) setSettingsLocal({ ...DEFAULT_SETTINGS, ...s.settings });
-      if (s.expenses) setExpensesLocal(s.expenses);
+      adopt('orders', s.orders, setOrdersLocal);
+      adopt('menu', s.menu, setMenuLocal);
+      adopt('stock', s.stock, setStockLocal);
+      adopt('staff', s.staff, setStaffLocal);
+      adopt('settings', s.settings, setSettingsLocal, (v) => ({ ...DEFAULT_SETTINGS, ...v }));
+      adopt('expenses', s.expenses, setExpensesLocal);
       // Normalised rather than spread over the defaults: stored state may still
       // carry the pre-split shape, and a shallow spread would leave the day
       // defaults sitting on top of the real day lists.
-      if (s.addons) setAddonsLocal(normalizeGroupStore(s.addons));
-      if (s.choices) setChoicesLocal(normalizeGroupStore(s.choices));
-      if (s.timeclock) setTimeclockLocal(s.timeclock);
-      if (s.payroll) setPayrollLocal(s.payroll);
+      adopt('addons', s.addons, setAddonsLocal, normalizeGroupStore);
+      adopt('choices', s.choices, setChoicesLocal, normalizeGroupStore);
+      adopt('timeclock', s.timeclock, setTimeclockLocal);
+      adopt('payroll', s.payroll, setPayrollLocal);
     };
+    // Reachable from the write path above, which re-reads the state after it has
+    // had to ignore a push (see the echo guard).
+    applyStateRef.current = applyState;
     fetchState()
       .then((s) => {
         applyState(s);
@@ -392,6 +540,12 @@ function App() {
   useEffect(() => {
     const tp = readTableParam();
     if (tp) {
+      // Take the seat, then wipe the link off the address bar. From here on the
+      // tab knows where it is sitting without the URL saying so — which is the
+      // point: a paid-up diner must not be able to press back, or dig the link
+      // out of their browser history, into the ordering page again.
+      writeSeat({ table: tp.table, shift: tp.shift });
+      stripTableParams();
       // Must go through tableForScan, not tp.table: this effect would otherwise
       // drag a re-seated phone back to the number on its QR every single load.
       setTableNo(tableForScan(tp.table));
@@ -401,6 +555,9 @@ function App() {
       // is open right now (by the clock) — never a stale theme from a previous
       // session, which could stamp a daytime order onto the night board/bills.
       setTheme(tp.shift || shiftNow());
+      // A phone whose session was closed is landing on the lock, not on a menu —
+      // "สแกนเข้าโต๊ะสำเร็จ" would promise it the opposite.
+      if (closedSessionRef.current) return;
       const suffix = tp.shift === 'day' ? ' (กลางวัน)' : tp.shift === 'night' ? ' (กลางคืน)' : '';
       showToast(`สแกนเข้าโต๊ะหมายเลข ${tableForScan(tp.table)}${suffix} สำเร็จ`);
     }
@@ -420,6 +577,10 @@ function App() {
   const handleLogin = async (user, pass, remember) => {
     // Verified server-side; credentials are never checked in the browser.
     const { token, user: u, name, role: r, shop } = await login(user, pass);
+    // Whatever this tab was before, it is a back-office tab now: drop any seat
+    // left over from a QR scan so a reload doesn't hand it back to the diner's
+    // menu.
+    clearSeat();
     const landRole = r === 'owner' ? 'owner' : 'staff';
     const landShop = shop === 'night' ? 'night' : 'day';
     setActiveStaffUser(u);
@@ -486,6 +647,10 @@ function App() {
 
   // The two panels that get a desktop-width layout (see the shell below).
   const isBackOffice = role === 'staff' || role === 'owner';
+  // This diner has paid: the closed-session screen replaces the menu entirely —
+  // including the load/error states, which are about data this screen no longer
+  // needs.
+  const isSessionClosed = role === 'customer' && !!closedSession;
 
   return (
     <div
@@ -635,16 +800,23 @@ function App() {
             <LoginPage onLogin={handleLogin} settings={settings} />
           )}
 
+          {/* เซสชันปิดแล้ว — takes over the whole customer screen, ahead of the
+              load states: the lock is remembered on the device, so it must show
+              instantly (and keep showing) even if the backend is unreachable. */}
+          {isSessionClosed && (
+            <SessionClosed session={closedSession} lang={lang} />
+          )}
+
           {/* First-load states. Once state has arrived these never show again,
               so live SSE updates don't flash a spinner over the menu. */}
-          {role !== 'login' && loadState === 'loading' && (
+          {role !== 'login' && !isSessionClosed && loadState === 'loading' && (
             <div className="py-16 text-center space-y-3 font-thai">
               <div className="w-8 h-8 mx-auto rounded-full border-2 border-[#A9713D]/25 border-t-[#A9713D] animate-spin" />
               <p className="text-xs text-neutral-400 font-medium">กำลังโหลดเมนูจาก Google Sheets...</p>
             </div>
           )}
 
-          {role !== 'login' && loadState === 'error' && (
+          {role !== 'login' && !isSessionClosed && loadState === 'error' && (
             <div className="py-12 px-4 text-center space-y-3 font-thai">
               <span className="text-3xl">📡</span>
               <h3 className="font-kanit font-bold text-sm text-[#5A2E14]">โหลดข้อมูลไม่สำเร็จ</h3>
@@ -665,7 +837,7 @@ function App() {
             </div>
           )}
 
-          {role !== 'login' && loadState === 'ready' && menu.length === 0 && (
+          {role !== 'login' && !isSessionClosed && loadState === 'ready' && menu.length === 0 && (
             <div className="py-16 text-center space-y-2 font-thai">
               <span className="text-3xl">🍽️</span>
               <h3 className="font-kanit font-bold text-sm text-[#5A2E14]">ยังไม่มีรายการอาหาร</h3>
@@ -673,7 +845,7 @@ function App() {
             </div>
           )}
 
-          {loadState === 'ready' && menu.length > 0 && role === 'customer' && (
+          {loadState === 'ready' && menu.length > 0 && role === 'customer' && !isSessionClosed && (
             <CustomerView
               theme={theme}
               lang={lang}

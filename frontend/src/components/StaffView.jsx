@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { addonsFor, choicesFor, defaultChoices, choicesCost } from '../menu-groups';
 import { orderShift, workdayKey, WORKDAY_START_HOUR } from '../shift';
 import { generateInvoiceNo } from '../invoice';
-import { mergeOrder, absorbBill, itemRound, itemStatus, statusFlowFor, deriveBillStatus, ITEM_STATUS_LABELS, ITEM_STATUS_COLORS, stampKitchenFields, checkoutStage, CHECKOUT_TYPE_LABELS, PAY_METHOD_LABELS, GRAB_TABLE, TAKEAWAY_TABLE, singleRoundBase, nextSingleRoundTable, tableLabel } from '../orders';
+import { mergeOrder, absorbBill, itemRound, itemStatus, statusFlowFor, deriveBillStatus, ITEM_STATUS_LABELS, ITEM_STATUS_COLORS, stampKitchenFields, checkoutStage, unservedItems, CHECKOUT_TYPE_LABELS, PAY_METHOD_LABELS, GRAB_TABLE, TAKEAWAY_TABLE, singleRoundBase, nextSingleRoundTable, tableLabel, isDiscountItem, billDiscount, discountBase, discountAmount, withDiscount } from '../orders';
 import KitchenBoard from './KitchenBoard';
+import PinGate from './PinGate';
 import { fetchStockItems, adjustStockItem, restockAllStock, consumeStockByName, fetchStockHistory, resolveImageUrl, clockTime } from '../api';
 import { STOCK_ACTION_LABELS, STOCK_ACTION_COLORS, fmtStockTime } from '../stock-history';
 import generatePayload from 'promptpay-qr';
@@ -27,7 +29,8 @@ import {
   Printer,
   RotateCcw,
   Bell,
-  Search
+  Search,
+  TicketPercent
 } from 'lucide-react';
 
 // Money on the printed slip: always two decimals with a thousands separator
@@ -77,6 +80,17 @@ function StaffView({
   // at window.print() — no on-screen preview. Cleared once printing returns.
   // { table, billIds, total, items, type } | null
   const [printData, setPrintData] = useState(null);
+  // An action waiting for someone to identify themselves with their ไอดีพนักงาน:
+  // { title, detail, confirmLabel, run(person) }. Printing a bill and giving a
+  // discount both go through this, so the name that ends up on the slip is the
+  // name of whoever actually stood at the till — not just whoever is signed in
+  // on this tablet. Cleared on cancel and after `run` has fired.
+  const [pinAction, setPinAction] = useState(null);
+  // The bill a discount is being set on, and the percentage typed for it. Held
+  // as the order id (not the object) so the preview always reads the live bill —
+  // a round arriving while the box is open must change what the % is worth.
+  const [discountFor, setDiscountFor] = useState(null);
+  const [discountPct, setDiscountPct] = useState('');
   // Which shift's orders the board shows + notifies for. This is LOCKED to the
   // logged-in staff member's own shift: App pins `theme` to their shop (day /
   // night) and hides the theme toggle, so a day-shift worker only ever sees the
@@ -88,6 +102,10 @@ function StaffView({
   const [targetTable, setTargetTable] = useState('1');
   const [takeOrderCart, setTakeOrderCart] = useState([]);
   const [directCat, setDirectCat] = useState(null);
+  // ค้นหาเมนูในหน้ารับออเดอร์: when non-empty, the item list searches every dish
+  // in this shift's menu by name (ignoring the category dropdown); empty falls
+  // back to the picked category.
+  const [directSearch, setDirectSearch] = useState('');
   const [selectedItem, setSelectedItem] = useState(null);
   const [selectedOption, setSelectedOption] = useState(null); // chosen protein/size (เนื้อสัตว์)
   const [modalQty, setModalQty] = useState(1);
@@ -195,11 +213,39 @@ function StaffView({
   };
 
   // --- New-order notifications (toast + sound) ------------------------------
-  // Track which order ids we've already seen so the first load doesn't fire a
-  // burst of toasts. On mount every current order is marked seen silently; only
-  // genuinely new orders that match the selected shift notify thereafter.
-  const seenOrderIds = useRef(null);
+  // Every order that lands has to reach staff, and "an order" is NOT the same
+  // thing as "a bill": a table that orders again is folded into the bill it
+  // already has (mergeOrder), so watching bill ids alone would ring for โต๊ะ 5's
+  // first order and stay silent for every round after it — food would sit on the
+  // board unnoticed. So each bill is remembered by its highest ROUND number, and
+  // a round appearing is what rings, whether it opened the bill or not.
+  //
+  // Two things deliberately do NOT ring:
+  //   * items staff add through แก้ไขบิล — those join the bill's current last
+  //     round on purpose, so the number does not move (see the editbill branch
+  //     of the add-item handler). The person adding them is already looking.
+  //   * รวมบิล — absorbing a bill re-numbers the incoming rounds on top of the
+  //     destination's, which bumps the count without a single new dish. The
+  //     absorbed-id count is tracked alongside the round to tell the two apart.
+  //
+  // On mount everything already on the board is recorded silently, so opening
+  // the panel never replays the day.
+  const seenRounds = useRef(null);
   const audioCtxRef = useRef(null);
+
+  // The bill's newest ordering round, and how many bills it has swallowed.
+  const orderBeat = (o) => ({
+    round: (o.items || []).reduce((m, it) => Math.max(m, itemRound(it)), 1),
+    absorbed: (o.absorbedIds || []).length,
+  });
+
+  // What the round that just landed is worth — the bill total would announce
+  // ฿840 for a ฿90 refill, which is the number staff would then repeat back to
+  // the table.
+  const roundTotal = (o, round) =>
+    (o.items || [])
+      .filter(it => itemRound(it) === round)
+      .reduce((sum, it) => sum + (it.price + (it.addonCost || 0)) * it.qty, 0);
 
   // Plays one of the chime patterns via the Web Audio API — no audio file to ship,
   // and a blocked/suspended context can never break the board (best-effort only).
@@ -228,23 +274,60 @@ function StaffView({
     }
   };
 
+  // A browser keeps an AudioContext suspended until the page has been
+  // interacted with, and iOS only lets it be resumed from inside the gesture
+  // itself — so a context first created when an order lands can come up mute,
+  // and the shop loses the very alert it relies on. The first touch anywhere in
+  // the panel opens it instead: from then on every chime can fire on its own.
   useEffect(() => {
+    const unlock = () => {
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        if (!audioCtxRef.current) audioCtxRef.current = new Ctx();
+        if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
+      } catch {
+        /* audio is best-effort */
+      }
+    };
+    window.addEventListener('pointerdown', unlock, { once: true });
+    window.addEventListener('keydown', unlock, { once: true });
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  }, []);
+
+  useEffect(() => {
+    const snapshot = new Map(orders.map(o => [o.id, orderBeat(o)]));
     // First run: remember everything already on the board without notifying.
-    if (seenOrderIds.current === null) {
-      seenOrderIds.current = new Set(orders.map(o => o.id));
+    if (seenRounds.current === null) {
+      seenRounds.current = snapshot;
       return;
     }
-    const fresh = orders.filter(o => !seenOrderIds.current.has(o.id));
+    const fresh = orders.filter(o => {
+      const before = seenRounds.current.get(o.id);
+      if (!before) return true;                       // a bill that just opened
+      const now = orderBeat(o);
+      // A later round on a bill we already know — unless the rounds only moved
+      // because another bill was merged into this one.
+      return now.round > before.round && now.absorbed === before.absorbed;
+    });
+    // Record every bill's new beat (even the other shift's) so a later shift
+    // toggle doesn't replay orders as if they had only just arrived.
+    seenRounds.current = snapshot;
     if (fresh.length === 0) return;
     const matching = fresh.filter(o => o.status === 'new' && orderShift(o) === shiftView);
-    // Mark every fresh order seen (even the other shift's) so a later shift
-    // toggle doesn't replay them as if they had only just arrived.
-    fresh.forEach(o => seenOrderIds.current.add(o.id));
     if (matching.length > 0) {
       const label = shiftView === 'day' ? 'กลางวัน' : 'กลางคืน';
-      matching.forEach(o =>
-        showToast(`🔔 ออเดอร์ใหม่ (${label}) โต๊ะ ${o.table} · ฿${(o.total || 0).toLocaleString()}`)
-      );
+      matching.forEach(o => {
+        // Name the round, so staff can tell "โต๊ะ 5 just sat down" from
+        // "โต๊ะ 5 has ordered again" without opening the card.
+        const round = orderBeat(o).round;
+        const what = round > 1 ? `สั่งเพิ่ม รอบที่ ${round}` : 'ออเดอร์ใหม่';
+        const amount = round > 1 ? roundTotal(o, round) : (o.total || 0);
+        showToast(`🔔 ${what} (${label}) ${tableLabel(o.table)} · ฿${amount.toLocaleString()}`);
+      });
       playChime();
     }
   }, [orders, shiftView]);
@@ -344,20 +427,49 @@ function StaffView({
     showToast(`เช็คบิล โต๊ะ ${table} เรียบร้อยแล้ว โต๊ะพร้อมรับลูกค้าใหม่`);
   };
 
-  // --- Checkout flow (พิมพ์บิล → เลือกประเภทเงิน → เคลียร์โต๊ะ) ----------------
+  // --- Checkout flow (ใส่ไอดี → พิมพ์บิล → เลือกประเภทเงิน → เคลียร์โต๊ะ) -------
+  // Ask who is printing, then print. EVERY press asks — including พิมพ์ซ้ำ —
+  // because the point of the code is to record the person who handed this
+  // particular slip to the table, and a session that stayed unlocked after the
+  // first bill would let the next one be printed under their name by whoever
+  // picked the tablet up.
+  const requestPrintBill = (order) => {
+    if (!order || order.status === 'paid' || order.status === 'cancelled') return;
+    // เสิร์ฟครบทุกจานก่อน ถึงพิมพ์บิลได้ — a slip printed while food is still in
+    // the kitchen charges for what has not arrived. Checked BEFORE the code is
+    // asked for: no point typing four digits into a refusal. Re-printing a bill
+    // already at 'printed' is fine — it passed this gate on the first print.
+    const remaining = unservedItems(order).length;
+    if (checkoutStage(order) !== 'printed' && remaining > 0) {
+      showToast(`ยังเสิร์ฟไม่ครบ (เหลือ ${remaining} รายการ) — กด "เสิร์ฟครบทุกจาน" ก่อนพิมพ์บิล`);
+      return;
+    }
+    setPinAction({
+      title: 'ใครเป็นคนพิมพ์บิลนี้?',
+      detail: `${tableLabel(order.table)} · ยอด ฿${(order.total || 0).toLocaleString()} — ชื่อที่ใส่ไอดีจะถูกพิมพ์ลงบนบิล`,
+      confirmLabel: 'พิมพ์บิล',
+      run: (person) => printBill(order, person),
+    });
+  };
+
   // Print the receipt for one bill. This opens the printable overlay AND moves
   // the bill into the 'printed' stage, which is what makes the money-type
   // buttons appear on the card (they are hidden until the bill is printed).
-  const printBill = (order) => {
+  //
+  // `person` is the account resolved from the ไอดีพนักงาน that was just typed.
+  // It is stamped onto the bill as well as onto the slip, so "who printed this"
+  // survives on the record and not only on the piece of paper.
+  const printBill = (order, person) => {
     if (!order || order.status === 'paid' || order.status === 'cancelled') return;
     const type = order.checkout?.type || 'normal';
-    if (checkoutStage(order) !== 'printed') {
-      setOrders(prev => prev.map(o =>
-        o.id === order.id
-          ? { ...o, checkout: { ...(o.checkout || {}), stage: 'printed', type } }
-          : o
-      ));
-    }
+    const printedBy = { user: person?.user || activeStaffUser || '', name: person?.name || 'พนักงาน', at: Date.now() };
+    // Kept on the ORDER, not inside `checkout` — settling clears the checkout
+    // block, and "who printed this bill" has to outlive the sale it belongs to.
+    setOrders(prev => prev.map(o =>
+      o.id === order.id
+        ? { ...o, printedBy, checkout: { ...(o.checkout || {}), stage: 'printed', type } }
+        : o
+    ));
     // Stash the slip's data; the effect below paints it into #bill-print and
     // fires window.print() straight away, so there is no preview to dismiss.
     setPrintData({
@@ -366,28 +478,114 @@ function StaffView({
       total: order.total || 0,
       items: order.items,
       type,
-      printedAt: Date.now(),
-      staff: activeStaffUser || 'พนักงาน',
+      printedAt: printedBy.at,
+      staff: printedBy.name,
     });
   };
 
-  // Auto-print: once the hidden slip is in the DOM, send it to the printer and
-  // clear the data. window.print() blocks until the (native) dialog closes, so
-  // the app never shows a print screen of its own. A tick's delay lets the QR
-  // SVG and layout paint before the print snapshot is taken.
+  // Auto-print: once the hidden slip is in the DOM, send it to the printer. A
+  // tick's delay lets the QR SVG and layout paint before the snapshot is taken.
+  //
+  // The slip has to stay mounted until the print job is REALLY over. On a
+  // desktop browser window.print() blocks until the dialog closes, so clearing
+  // on the next line was fine. On a phone it does NOT block: it returns at once
+  // and the print sheet opens a moment later — so clearing there ripped the
+  // slip out of the DOM before the phone had rendered it, and staff got a blank
+  // print and a blank PDF. That is the whole reason printing worked on the
+  // computer but not on the phone.
+  //
+  // So the clean-up waits for the browser to say it is done: `afterprint`, or
+  // the print media query switching back off (what iOS reports), with a long
+  // timer as a last resort for a browser that fires neither.
   useEffect(() => {
     if (!printData) return;
-    const timer = setTimeout(() => {
-      window.print();
+    let cleared = false;
+    const finish = () => {
+      if (cleared) return;
+      cleared = true;
       setPrintData(null);
-    }, 120);
-    return () => clearTimeout(timer);
+    };
+
+    const start = setTimeout(() => window.print(), 120);
+    const giveUp = setTimeout(finish, 60000);
+    const printMedia = window.matchMedia?.('print');
+    const onMedia = (e) => { if (!e.matches) finish(); };
+
+    window.addEventListener('afterprint', finish);
+    printMedia?.addEventListener?.('change', onMedia);
+    return () => {
+      clearTimeout(start);
+      clearTimeout(giveUp);
+      window.removeEventListener('afterprint', finish);
+      printMedia?.removeEventListener?.('change', onMedia);
+    };
   }, [printData]);
 
   // Settle one bill with the money type staff actually received (เงินสด / สแกน
   // QR / คนละครึ่ง). Frees the table immediately, replacing the old check-bill.
+  //
+  // Asks first, and names the money type in the question: the three buttons sit
+  // side by side and settling is the one action on this screen that cannot be
+  // undone — the bill is stamped paid, the table is freed for the next group and
+  // the takings are filed under that method. A mis-tap picks the wrong one
+  // silently, and the owner's report only shows it much later.
   const settleWithMethod = (order, method) => {
+    const label = PAY_METHOD_LABELS[method] || method;
+    const ok = confirm(
+      `ยืนยันรับเงินด้วย "${label}" หรือไม่?\n\n` +
+      `${tableLabel(order.table)} · ยอด ฿${(order.total || 0).toLocaleString()}\n` +
+      'กดตกลงแล้วบิลจะปิดและโต๊ะจะว่างทันที'
+    );
+    if (!ok) return;
     settleBills([order.id], order.table, method);
+  };
+
+  // --- ส่วนลด (%) --------------------------------------------------------------
+  // Open the box, pre-filled with whatever discount the bill already carries so
+  // "10% → 15%" is a correction rather than a second discount stacked on top.
+  const openDiscount = (order) => {
+    setDiscountFor(order.id);
+    setDiscountPct(String(billDiscount(order)?.percent || ''));
+  };
+
+  // Confirming does not apply anything yet: a discount is money off the shop's
+  // takings, so it is signed with a ไอดีพนักงาน exactly like a printed bill.
+  const confirmDiscount = (order, pct) => {
+    const percent = Number(pct);
+    if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
+      showToast('ส่วนลดต้องอยู่ระหว่าง 0–100%');
+      return;
+    }
+    const removing = percent === 0;
+    setPinAction({
+      title: removing ? 'ใครเป็นคนยกเลิกส่วนลด?' : 'ใครเป็นคนให้ส่วนลดนี้?',
+      detail: removing
+        ? `${tableLabel(order.table)} — นำส่วนลดออกจากบิล`
+        : `${tableLabel(order.table)} · ลด ${percent}% = -฿${discountAmount(order.items, percent).toLocaleString()}`,
+      confirmLabel: removing ? 'ยกเลิกส่วนลด' : 'ให้ส่วนลด',
+      run: (person) => applyDiscount(order.id, percent, person),
+    });
+  };
+
+  const applyDiscount = (orderId, percent, person) => {
+    let applied = null;
+    setOrders(prev => prev.map(o => {
+      // Recomputed against the bill as it stands NOW, not as it looked when the
+      // box was opened — the table may have ordered another round in between.
+      if (o.id !== orderId) return o;
+      const next = withDiscount(o, percent, person?.name || '');
+      applied = next;
+      return next;
+    }));
+    setDiscountFor(null);
+    setDiscountPct('');
+    if (!applied) return;
+    const line = billDiscount(applied);
+    showToast(
+      line
+        ? `ให้ส่วนลด ${line.percent}% (-฿${Math.abs(line.price).toLocaleString()}) โดย ${person?.name || 'พนักงาน'} · ยอดใหม่ ฿${(applied.total || 0).toLocaleString()}`
+        : `นำส่วนลดออกจาก${tableLabel(applied.table)}แล้ว โดย ${person?.name || 'พนักงาน'}`
+    );
   };
 
   // ยกเลิกบิล — send the table back to the un-checked-out state so the customer's
@@ -395,23 +593,6 @@ function StaffView({
   const cancelBill = (order) => {
     setOrders(prev => prev.map(o => (o.id === order.id ? { ...o, checkout: null } : o)));
     showToast(`ยกเลิกบิล โต๊ะ ${order.table} — ปลดล็อกให้ลูกค้าสั่งเพิ่มได้`);
-  };
-
-  // Re-open a bill that was closed by mistake (or before payment finished): pull
-  // it back out of 'paid' and straight into the 'printed' stage, so the money-
-  // type buttons are ready again without re-printing or re-keying the order.
-  const reopenBill = (order) => {
-    if (!confirm(`ดึงโต๊ะ ${order.table} กลับมาที่สถานะรอเช็กบิลใช่หรือไม่?`)) return;
-    setOrders(prev => prev.map(o => {
-      if (o.id !== order.id) return o;
-      const { paidAt, payMethod, invoiceNo, ...rest } = o;
-      return {
-        ...rest,
-        status: deriveBillStatus(o.items),
-        checkout: { stage: 'printed', type: o.checkout?.type || 'normal' },
-      };
-    }));
-    showToast(`ดึงโต๊ะ ${order.table} กลับมารอเช็กบิลแล้ว`);
   };
 
   const cancelOrder = (orderId) => {
@@ -444,7 +625,9 @@ function StaffView({
   // the menu row via menuId and fall back to stripping that suffix. Custom
   // "เมนูอื่นๆ" items return null: they never touch stock.
   const linkedStockName = (item) => {
-    if (!item || item.menuId === 'custom') return null;
+    // A ส่วนลด line is money, not a dish — it must never be looked up in, or
+    // deducted from, the stock room.
+    if (!item || item.menuId === 'custom' || isDiscountItem(item)) return null;
     const m = menu.find(mn => mn.id === item.menuId);
     if (m) return m.name;
     return String(item.name || '').replace(/\s*\([^)]*\)\s*$/, '').trim() || null;
@@ -452,17 +635,32 @@ function StaffView({
 
   // Mirror a serve/un-serve into the SQL stock_items row (คลังวัตถุดิบ) with the
   // same name — the stock the customer storefront checks. Positive qty deducts,
-  // negative restores; no matching row is a no-op on the server. Fire-and-forget
-  // so a network hiccup never blocks the serve tap; on success the คลังวัตถุดิบ
-  // tab's local list is kept in step.
-  const consumeLinkedStock = (item, qty) => {
+  // negative restores; no matching row is a no-op on the server. A network
+  // hiccup never blocks the serve tap — the error is logged and the tap stands.
+  //
+  // This resolves to the updated row (or null) rather than writing state itself,
+  // so a caller cutting several dishes at once can fold every answer into ONE
+  // state update. Writing per reply meant one re-render of the whole board per
+  // dish, each landing at its own moment — invisible on localhost where they all
+  // come back together, a visible stutter over a real network.
+  const consumeLinkedStockRow = (item, qty) => {
     const name = linkedStockName(item);
-    if (!name || !qty) return;
-    consumeStockByName(name, qty)
-      .then((updated) => {
-        if (updated) setStockItems(prev => prev.map(it => (it.id === updated.id ? updated : it)));
-      })
-      .catch((err) => console.error('[stock] ตัดสต็อกไม่สำเร็จ:', err.message || err));
+    if (!name || !qty) return Promise.resolve(null);
+    return consumeStockByName(name, qty).catch((err) => {
+      console.error('[stock] ตัดสต็อกไม่สำเร็จ:', err.message || err);
+      return null;
+    });
+  };
+
+  // Fold a batch of updated stock rows into the คลังวัตถุดิบ list in one render.
+  const applyStockRows = (rows) => {
+    const byId = new Map((rows || []).filter(Boolean).map(r => [r.id, r]));
+    if (byId.size === 0) return;
+    setStockItems(prev => prev.map(it => byId.get(it.id) || it));
+  };
+
+  const consumeLinkedStock = (item, qty) => {
+    consumeLinkedStockRow(item, qty).then(row => applyStockRows([row]));
   };
 
   // How many units of the stock behind a dish are on hand right now — used to
@@ -560,7 +758,8 @@ function StaffView({
         });
         return next;
       });
-      toDeduct.forEach(it => consumeLinkedStock(it, it.qty));
+      // One render for the whole batch, not one per dish (see applyStockRows).
+      Promise.all(toDeduct.map(it => consumeLinkedStockRow(it, it.qty))).then(applyStockRows);
     }
 
     setOrders(prev => prev.map(o => {
@@ -945,12 +1144,18 @@ function StaffView({
         if (o.id === editingBill.id) {
           // Re-derive the bill status: a newly added 'new' dish reopens the
           // ticket for the kitchen even if earlier rounds were served.
-          return {
+          const saved = {
             ...o,
             items: editingBill.items,
             total: editingBill.total,
             status: deriveBillStatus(editingBill.items),
           };
+          // Editing changes what the bill comes to, so a ส่วนลด on it is
+          // re-struck over the new subtotal and pushed back to the end — the
+          // same rule a new round follows (see mergeOrder). Its percentage and
+          // the name that authorised it are untouched.
+          const discount = billDiscount(saved);
+          return discount ? withDiscount(saved, discount.percent, discount.by) : saved;
         }
         return o;
       }));
@@ -1145,14 +1350,32 @@ function StaffView({
                           {getStatusLabel(order.status)}
                         </span>
                       ) : (
-                        <button
-                          onClick={() => openEditBill(order)}
-                          title="แก้ไขบิล (เพิ่ม / ลบ / แก้จำนวน)"
-                          aria-label="แก้ไขบิล"
-                          className="p-1.5 -mr-1 rounded-lg text-neutral-400 hover:text-amber-700 hover:bg-amber-500/10 transition active:scale-95"
-                        >
-                          <Edit className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center gap-0.5 -mr-1">
+                          {/* ส่วนลด — sits next to แก้ไขบิล because both change what
+                              the table owes; this one needs a ไอดีพนักงาน, so it
+                              is deliberately its own button rather than an
+                              option buried inside the bill editor. */}
+                          <button
+                            onClick={() => openDiscount(order)}
+                            title="ให้ส่วนลด (%)"
+                            aria-label="ให้ส่วนลด"
+                            className={`p-1.5 rounded-lg transition active:scale-95 ${
+                              billDiscount(order)
+                                ? 'text-rose-600 bg-rose-50 hover:bg-rose-100'
+                                : 'text-neutral-400 hover:text-rose-600 hover:bg-rose-500/10'
+                            }`}
+                          >
+                            <TicketPercent className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => openEditBill(order)}
+                            title="แก้ไขบิล (เพิ่ม / ลบ / แก้จำนวน)"
+                            aria-label="แก้ไขบิล"
+                            className="p-1.5 rounded-lg text-neutral-400 hover:text-amber-700 hover:bg-amber-500/10 transition active:scale-95"
+                          >
+                            <Edit className="w-4 h-4" />
+                          </button>
+                        </div>
                       )}
                     </div>
 
@@ -1166,6 +1389,26 @@ function StaffView({
                       {order.items.map((item, idx) => {
                         // Divider between ordering rounds merged into this bill.
                         const showRoundDivider = idx > 0 && itemRound(item) !== itemRound(order.items[idx - 1]);
+                        // A discount is a bill line, not a dish: it gets no
+                        // quantity, no kitchen steps and its own colour, so it
+                        // never reads as something waiting to be cooked.
+                        if (isDiscountItem(item)) {
+                          return (
+                            <div
+                              key={idx}
+                              className="flex justify-between items-center gap-2 text-xs font-thai font-bold text-rose-700 bg-rose-50 border border-rose-100 rounded-lg px-2 py-1.5"
+                            >
+                              <span className="flex items-center gap-1.5 min-w-0">
+                                <TicketPercent className="w-3.5 h-3.5 shrink-0" />
+                                <span className="truncate">
+                                  {item.name}
+                                  {item.by && <span className="font-medium text-rose-500"> · โดย {item.by}</span>}
+                                </span>
+                              </span>
+                              <span className="font-mono shrink-0">-฿{Math.abs(item.price).toLocaleString()}</span>
+                            </div>
+                          );
+                        }
                         return (
                           <React.Fragment key={idx}>
                             {showRoundDivider && (
@@ -1260,13 +1503,29 @@ function StaffView({
                         )}
                         {(() => {
                           const stage = checkoutStage(order);
+                          // พิมพ์บิลได้เมื่อเสิร์ฟครบทุกจาน — the "✓ เสิร์ฟครบทุกจาน"
+                          // button right above is the one-tap way out of this.
+                          const remaining = unservedItems(order).length;
+                          const canPrint = remaining === 0;
+                          const printClass = canPrint
+                            ? 'bg-amber-600 hover:bg-amber-700 text-white'
+                            : 'bg-neutral-100 text-neutral-400 border border-neutral-200 cursor-not-allowed';
+                          const notServedNote = (
+                            <p className="text-[10px] font-bold text-center text-amber-800 bg-amber-50 border border-amber-200 rounded-lg py-1.5">
+                              ⏳ ยังเสิร์ฟไม่ครบ (เหลือ {remaining} รายการ) — เสิร์ฟครบก่อนถึงพิมพ์บิลได้
+                            </p>
+                          );
 
                           // Receipt printed → pick the money actually received.
                           if (stage === 'printed') {
                             return (
                               <div className="space-y-2">
                                 <p className="text-[10px] font-bold text-center text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg py-1.5">
-                                  🧾 พิมพ์บิลแล้ว · เลือกประเภทเงินที่ได้รับจริงเพื่อปิดโต๊ะ
+                                  🧾 พิมพ์บิลแล้ว
+                                  {/* Who signed for it, so a question about this
+                                      slip has an answer on the board itself. */}
+                                  {order.printedBy?.name && <> โดย {order.printedBy.name}</>}
+                                  {' '}· เลือกประเภทเงินที่ได้รับจริงเพื่อปิดโต๊ะ
                                 </p>
                                 <div className="grid grid-cols-3 gap-1.5">
                                   <button
@@ -1290,7 +1549,7 @@ function StaffView({
                                 </div>
                                 <div className="flex gap-2">
                                   <button
-                                    onClick={() => printBill(order)}
+                                    onClick={() => requestPrintBill(order)}
                                     className="flex-1 flex items-center justify-center gap-1 border border-neutral-200 hover:bg-neutral-50 text-neutral-600 font-bold py-2 rounded-xl text-xs transition"
                                   >
                                     <Printer className="w-3.5 h-3.5" /> พิมพ์ซ้ำ
@@ -1318,10 +1577,12 @@ function StaffView({
                                     {isSplit && ' — อย่าลืมหยิบโทรศัพท์ร้าน (แอปถุงเงิน)'}
                                   </span>
                                 </div>
+                                {!canPrint && notServedNote}
                                 <div className="flex gap-2">
                                   <button
-                                    onClick={() => printBill(order)}
-                                    className="flex-1 flex items-center justify-center gap-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold py-2 rounded-xl text-xs transition"
+                                    onClick={() => requestPrintBill(order)}
+                                    disabled={!canPrint}
+                                    className={`flex-1 flex items-center justify-center gap-1.5 font-bold py-2 rounded-xl text-xs transition ${printClass}`}
                                   >
                                     <Printer className="w-4 h-4" /> พิมพ์บิล
                                   </button>
@@ -1338,38 +1599,37 @@ function StaffView({
 
                           // Open bill (incl. staff-initiated "เก็บเงินด้วยค่ะ").
                           return (
-                            <div className="flex gap-2">
-                              <button
-                                onClick={() => printBill(order)}
-                                className="flex-1 flex items-center justify-center gap-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold py-2 rounded-xl text-xs transition"
-                              >
-                                <Printer className="w-4 h-4" /> พิมพ์บิล / เช็กบิล
-                              </button>
-                              <button
-                                onClick={() => cancelOrder(order.id)}
-                                className="px-3 border border-neutral-200 hover:bg-neutral-50 text-neutral-500 font-bold py-2 rounded-xl text-xs transition"
-                              >
-                                ยกเลิก
-                              </button>
+                            <div className="space-y-2">
+                              {!canPrint && notServedNote}
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => requestPrintBill(order)}
+                                  disabled={!canPrint}
+                                  className={`flex-1 flex items-center justify-center gap-1.5 font-bold py-2 rounded-xl text-xs transition ${printClass}`}
+                                >
+                                  <Printer className="w-4 h-4" /> พิมพ์บิล / เช็กบิล
+                                </button>
+                                <button
+                                  onClick={() => cancelOrder(order.id)}
+                                  className="px-3 border border-neutral-200 hover:bg-neutral-50 text-neutral-500 font-bold py-2 rounded-xl text-xs transition"
+                                >
+                                  ยกเลิก
+                                </button>
+                              </div>
                             </div>
                           );
                         })()}
                       </div>
                     )}
 
-                    {/* Re-open a bill closed by mistake / before payment finished. */}
+                    {/* A settled bill is final — it only reports which money came
+                        in. (The "ดึงโต๊ะกลับ" re-open button used to sit here.) */}
                     {order.status === 'paid' && (
-                      <div className="mt-3 pt-2.5 border-t border-neutral-50 flex items-center justify-between gap-2">
+                      <div className="mt-3 pt-2.5 border-t border-neutral-50">
                         <span className="text-[10px] text-neutral-400 font-medium">
                           {order.payMethod ? `รับชำระ: ${PAY_METHOD_LABELS[order.payMethod] || order.payMethod}` : 'ชำระเงินแล้ว'}
+                          {order.printedBy?.name && ` · พิมพ์บิลโดย ${order.printedBy.name}`}
                         </span>
-                        <button
-                          onClick={() => reopenBill(order)}
-                          className="flex items-center gap-1 border border-neutral-200 hover:bg-neutral-50 text-neutral-600 font-bold py-1.5 px-3 rounded-lg text-[11px] transition"
-                          title="ดึงโต๊ะกลับมารอเช็กบิล (แก้กรณีเผลอปิดโต๊ะ)"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" /> ดึงโต๊ะกลับ
-                        </button>
                       </div>
                     )}
                   </div>
@@ -1414,23 +1674,59 @@ function StaffView({
                 )}
               </div>
 
-              {/* Direct Categories Selector — a dropdown instead of a tab row so
-                  a long category list stays compact on the take-order screen. */}
-              <div className="pt-1">
-                <select
-                  value={directCat}
-                  onChange={e => setDirectCat(e.target.value)}
-                  className="w-full border rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-amber-500 bg-neutral-50 font-bold text-xs font-thai"
-                >
-                  {categories.map(c => (
-                    <option key={c} value={c}>{c}</option>
-                  ))}
-                </select>
+              {/* ค้นหาเมนู — type to search every dish by name across all
+                  categories; clears back to the category view when emptied. */}
+              <div className="pt-1 relative">
+                <Search className="w-4 h-4 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={directSearch}
+                  onChange={e => setDirectSearch(e.target.value)}
+                  placeholder="ค้นหาเมนู..."
+                  className="w-full border rounded-xl p-3 pl-9 pr-9 focus:outline-none focus:ring-2 focus:ring-amber-500 bg-neutral-50 font-bold text-xs font-thai"
+                />
+                {directSearch && (
+                  <button
+                    onClick={() => setDirectSearch('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 p-0.5 rounded hover:bg-neutral-200"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
               </div>
+
+              {/* Direct Categories Selector — a dropdown instead of a tab row so
+                  a long category list stays compact on the take-order screen.
+                  Hidden while searching, since search spans every category. */}
+              {!directSearch.trim() && (
+                <div className="pt-1">
+                  <select
+                    value={directCat}
+                    onChange={e => setDirectCat(e.target.value)}
+                    className="w-full border rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-amber-500 bg-neutral-50 font-bold text-xs font-thai"
+                  >
+                    {categories.map(c => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {/* Quick Item List */}
               <div className="divide-y divide-neutral-100 max-h-56 lg:max-h-96 overflow-y-auto">
-                {filteredMenu.filter(m => m.category === directCat).map(dish => {
+                {(() => {
+                  const q = directSearch.trim().toLowerCase();
+                  const dishes = q
+                    ? filteredMenu.filter(m => m.name.toLowerCase().includes(q))
+                    : filteredMenu.filter(m => m.category === directCat);
+                  if (dishes.length === 0) {
+                    return (
+                      <p className="py-6 text-center text-neutral-400 font-thai text-xs">
+                        ไม่พบเมนูที่ค้นหา
+                      </p>
+                    );
+                  }
+                  return dishes.map(dish => {
                   const qty = takeOrderCart.filter(i => i.menuId === dish.id).reduce((s, i) => s + i.qty, 0);
                   return (
                     <div key={dish.id} className="py-2.5 flex items-center justify-between font-thai text-xs">
@@ -1451,7 +1747,8 @@ function StaffView({
                       </button>
                     </div>
                   );
-                })}
+                  });
+                })()}
               </div>
 
               {/* Custom item entry — staff types a menu item that isn't listed */}
@@ -1897,7 +2194,11 @@ function StaffView({
         <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[120] flex items-end sm:items-center justify-center p-0 sm:p-4">
           <div className="bg-admin-card rounded-t-3xl sm:rounded-3xl max-w-md w-full p-6 space-y-4 animate-slide-up text-neutral-800 shadow-2xl border-t border-neutral-100">
             <div className="flex items-start gap-3">
-              <span className="w-10 h-10 rounded-xl bg-neutral-900 text-white flex items-center justify-center shrink-0">
+              {/* bg-ctl, not bg-neutral-900: the night theme inverts the grey
+                  ramp, so neutral-900 turns near-WHITE there and a white glyph
+                  on top disappears. The ctl token is the one that flips to
+                  amber-on-dark instead (see tailwind.config.js). */}
+              <span className="w-10 h-10 rounded-xl bg-ctl text-ctl-ink flex items-center justify-center shrink-0">
                 <Plus className="w-5 h-5" />
               </span>
               <div className="min-w-0">
@@ -1929,7 +2230,7 @@ function StaffView({
               <button
                 onClick={confirmAdd}
                 disabled={!(Number.parseInt(addInput, 10) > 0)}
-                className="flex-1 bg-neutral-900 hover:bg-black text-white font-bold py-2.5 rounded-xl text-sm transition disabled:opacity-40 disabled:cursor-not-allowed"
+                className="flex-1 bg-ctl hover:bg-ctl-hover text-white font-bold py-2.5 rounded-xl text-sm transition disabled:opacity-90 disabled:cursor-not-allowed"
               >
                 ยืนยันเพิ่ม
               </button>
@@ -2429,8 +2730,14 @@ function StaffView({
                 editingBill.items.map((item, index) => (
                   <div key={index} className="py-3 flex justify-between items-center text-xs font-thai">
                     <div className="space-y-0.5 max-w-[50%]">
-                      <span className="font-extrabold text-neutral-800 block truncate">{item.name}</span>
-                      <span className="text-neutral-400 font-mono">฿{item.price + (item.addonCost || 0)} / ชิ้น</span>
+                      <span className={`font-extrabold block truncate ${isDiscountItem(item) ? 'text-rose-700' : 'text-neutral-800'}`}>
+                        {item.name}
+                      </span>
+                      {isDiscountItem(item) ? (
+                        <span className="text-neutral-400">ส่วนลดท้ายบิล{item.by ? ` · โดย ${item.by}` : ''}</span>
+                      ) : (
+                        <span className="text-neutral-400 font-mono">฿{item.price + (item.addonCost || 0)} / ชิ้น</span>
+                      )}
                       {item.addOns && item.addOns.length > 0 && (
                         <p className="text-[9px] text-neutral-400 truncate">พิเศษ: {item.addOns.join(', ')}</p>
                       )}
@@ -2440,21 +2747,30 @@ function StaffView({
                     </div>
 
                     <div className="flex items-center gap-3">
-                      <div className="flex items-center gap-2 border rounded-lg px-2 py-0.5 bg-neutral-50">
-                        <button 
-                          onClick={() => handleEditBillQty(index, -1)}
-                          className="p-0.5 hover:bg-neutral-200 rounded text-neutral-500"
-                        >
-                          <Minus className="w-3 h-3" />
-                        </button>
-                        <span className="font-bold w-4 text-center font-mono">{item.qty}</span>
-                        <button 
-                          onClick={() => handleEditBillQty(index, 1)}
-                          className="p-0.5 hover:bg-neutral-200 rounded text-neutral-500"
-                        >
-                          <Plus className="w-3 h-3" />
-                        </button>
-                      </div>
+                      {/* A ส่วนลด line has no quantity to step — doubling it
+                          would silently double the money off. It can still be
+                          removed here, or changed from the ส่วนลด button. */}
+                      {isDiscountItem(item) ? (
+                        <span className="font-bold font-mono text-rose-600">
+                          -฿{Math.abs(item.price).toLocaleString()}
+                        </span>
+                      ) : (
+                        <div className="flex items-center gap-2 border rounded-lg px-2 py-0.5 bg-neutral-50">
+                          <button
+                            onClick={() => handleEditBillQty(index, -1)}
+                            className="p-0.5 hover:bg-neutral-200 rounded text-neutral-500"
+                          >
+                            <Minus className="w-3 h-3" />
+                          </button>
+                          <span className="font-bold w-4 text-center font-mono">{item.qty}</span>
+                          <button
+                            onClick={() => handleEditBillQty(index, 1)}
+                            className="p-0.5 hover:bg-neutral-200 rounded text-neutral-500"
+                          >
+                            <Plus className="w-3 h-3" />
+                          </button>
+                        </div>
+                      )}
                       <button 
                         onClick={() => handleRemoveEditBillItem(index)}
                         className="text-red-500 hover:text-red-700 p-1 rounded-lg hover:bg-red-500/10"
@@ -2519,12 +2835,144 @@ function StaffView({
         </div>
       )}
 
+      {/* ส่วนลด — pick a percentage, see what it takes off, then sign for it. */}
+      {discountFor && (() => {
+        const order = orders.find(o => o.id === discountFor);
+        // The bill could have been settled from another device while this was
+        // open; there is nothing to discount then.
+        if (!order || order.status === 'paid' || order.status === 'cancelled') {
+          return null;
+        }
+        const pct = Number(discountPct) || 0;
+        const base = discountBase(order.items);
+        const amount = discountAmount(order.items, pct);
+        const current = billDiscount(order);
+        const valid = pct >= 0 && pct <= 100;
+        return (
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-xs z-[250] flex items-center justify-center p-4 font-thai">
+            <div className="bg-admin-card rounded-2xl w-full max-w-xs p-5 space-y-4 shadow-2xl text-neutral-800">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <span className="w-10 h-10 rounded-xl bg-rose-500/10 text-rose-600 flex items-center justify-center shrink-0">
+                    <TicketPercent className="w-5 h-5" />
+                  </span>
+                  <div>
+                    <h3 className="font-kanit font-extrabold text-sm leading-tight">ให้ส่วนลด</h3>
+                    <p className="text-[11px] text-neutral-500">{tableLabel(order.table)} · {order.no}</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setDiscountFor(null)}
+                  className="p-1 -mr-1 -mt-1 rounded-lg text-neutral-400 hover:bg-neutral-100 transition"
+                  aria-label="ปิด"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-4 gap-1.5">
+                {[5, 10, 15, 20].map(p => (
+                  <button
+                    key={p}
+                    onClick={() => setDiscountPct(String(p))}
+                    className={`py-2 rounded-xl font-bold text-xs transition border ${
+                      pct === p
+                        ? 'bg-rose-600 border-rose-600 text-white'
+                        : 'bg-admin-field border-neutral-200 text-neutral-600 hover:border-rose-300'
+                    }`}
+                  >
+                    {p}%
+                  </button>
+                ))}
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">
+                  หรือกรอกเปอร์เซ็นต์เอง
+                </label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={discountPct}
+                    onChange={(e) => setDiscountPct(e.target.value)}
+                    placeholder="0"
+                    className="w-full border rounded-xl p-3 pr-9 bg-admin-field focus:outline-none focus:ring-2 focus:ring-rose-500 font-mono font-bold text-lg"
+                  />
+                  <span className="absolute right-3.5 top-1/2 -translate-y-1/2 font-bold text-neutral-400">%</span>
+                </div>
+              </div>
+
+              {/* What it actually comes to, before anyone signs for it. */}
+              <div className="bg-admin-field border border-neutral-200 rounded-xl p-3 space-y-1 text-xs">
+                <div className="flex justify-between text-neutral-500">
+                  <span>ยอดก่อนลด</span>
+                  <span className="font-mono font-bold">฿{base.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between text-rose-600 font-bold">
+                  <span>ส่วนลด {pct || 0}%</span>
+                  <span className="font-mono">-฿{amount.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between border-t border-neutral-200 pt-1 font-extrabold">
+                  <span>ยอดสุทธิ</span>
+                  <span className="font-mono">฿{(base - amount).toLocaleString()}</span>
+                </div>
+                <p className="text-[10px] text-neutral-400 pt-0.5">ปัดเศษเป็นจำนวนเต็มบาท</p>
+              </div>
+
+              <div className="space-y-2 text-xs">
+                <button
+                  onClick={() => confirmDiscount(order, pct)}
+                  disabled={!valid || pct === 0}
+                  className="w-full bg-rose-600 hover:bg-rose-700 disabled:bg-neutral-200 disabled:text-neutral-400 text-white font-bold py-2.5 rounded-xl transition"
+                >
+                  ยืนยัน (ใส่ไอดีพนักงานต่อไป)
+                </button>
+                {/* Only offered when there IS one — otherwise it is a button that
+                    asks for a PIN to change nothing. */}
+                {current && (
+                  <button
+                    onClick={() => confirmDiscount(order, 0)}
+                    className="w-full border border-neutral-200 hover:bg-neutral-50 text-neutral-600 font-bold py-2.5 rounded-xl transition"
+                  >
+                    นำส่วนลด {current.percent}% ออกจากบิล
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ใส่ไอดีพนักงาน — sits above every other layer, because the actions it
+          guards (พิมพ์บิล / ส่วนลด) are started from inside modals of their own. */}
+      {pinAction && (
+        <PinGate
+          title={pinAction.title}
+          detail={pinAction.detail}
+          confirmLabel={pinAction.confirmLabel}
+          onCancel={() => setPinAction(null)}
+          onVerified={(person) => {
+            // Close first: `run` may open the print overlay or a toast, and the
+            // dialog must not still be sitting on top of it.
+            setPinAction(null);
+            pinAction.run(person);
+          }}
+        />
+      )}
+
       {/* HIDDEN PRINT SLIP — never shown on screen (off-canvas), only revealed
           to the printer by the @media print rule in index.css. printBill() fills
           this in and window.print() fires automatically, so there is no preview
           screen: staff tap พิมพ์บิล and the XP-80T just prints. Styled plain
-          (no colour/shadow/rounded borders) for an 80mm monochrome thermal roll. */}
-      {printData && (
+          (no colour/shadow/rounded borders) for an 80mm monochrome thermal roll.
+
+          Portalled to <body> rather than left here inside the app tree: the
+          print stylesheet hides every child of <body> EXCEPT this one, which is
+          the only way of collapsing the app that phones render correctly (see
+          the @media print block in index.css). */}
+      {printData && createPortal(
         <div id="bill-print" aria-hidden="true">
           <div className="bp-hr-eq" />
 
@@ -2563,6 +3011,17 @@ function StaffView({
           {printData.items.map((it, i) => {
             const base = (it.price || 0) * it.qty;
             const addon = (it.addonCost || 0) * it.qty;
+            // A discount prints as a plain deduction: no "x1" quantity, since it
+            // is one adjustment to the bill rather than one of something.
+            if (isDiscountItem(it)) {
+              return (
+                <div className="bp-item" key={i}>
+                  <span className="bp-name">{it.name}</span>
+                  <span className="bp-qty" />
+                  <span className="bp-amt">-{fmtBaht(Math.abs(base))}</span>
+                </div>
+              );
+            }
             return (
               <React.Fragment key={i}>
                 <div className="bp-item">
@@ -2609,7 +3068,8 @@ function StaffView({
           </div>
 
           <div className="bp-hr-eq" />
-        </div>
+        </div>,
+        document.body
       )}
 
     </div>

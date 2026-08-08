@@ -272,9 +272,24 @@ export async function setPayrollStatus({ user, month, status }) {
   });
 }
 
+// Identify the person at the till from their 4-digit ไอดีพนักงาน. Resolves to
+// { user, name, role, position } when the code matches an account, and REJECTS
+// (with the server's Thai message) when it does not — the codes are only ever
+// checked on the server, since the staff panel is never sent the staff list.
+//
+// Used by every action that has to carry a person's name rather than a device's:
+// printing a bill, granting a discount.
+export async function verifyStaffPin(pin) {
+  return authedJson('/api/staff/verify-pin', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pin: String(pin || '') }),
+  });
+}
+
 // Owner edits one staff account. `patch` may carry any of { user, name, pass,
-// dailyWage }; anything left out keeps its stored value, and an empty `pass`
-// means "leave the password alone".
+// pin, dailyWage }; anything left out keeps its stored value, and an empty
+// `pass`/`pin` means "leave that one alone".
 //
 // Not done by writing the whole staff array: renaming someone has to move their
 // time-clock and payroll history onto the new username, which only the server

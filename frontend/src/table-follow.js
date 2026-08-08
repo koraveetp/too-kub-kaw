@@ -101,6 +101,26 @@ export function resolveSeating({ orders, currentTable, scanTable, seen, follow }
     if (scanTable != null) table = scanTable;
   }
 
+  // 1a. Drop a redirection no bill actually backs up. An earlier build followed
+  //     ANY known bill that turned up under another number, which quietly
+  //     redirected a phone to whichever table it happened to remember a bill at
+  //     — and then wrote that mistake down. Re-checking the stored follow here
+  //     means such a record heals itself on the next load instead of having to
+  //     be cleared by hand.
+  if (nextFollow) {
+    const target = open.find(o =>
+      o.id === nextFollow.billId || (o.absorbedIds || []).includes(nextFollow.billId)
+    );
+    const backed = target && (
+      (target.absorbedIds || []).some(id => seen.has(id) || id === nextFollow.billId) ||
+      (target.movedFrom || []).map(String).includes(String(nextFollow.from))
+    );
+    if (target && !backed) {
+      nextFollow = null;
+      if (scanTable != null) table = scanTable;
+    }
+  }
+
   // 1b. Somebody else is now sitting at the table this QR belongs to — there is
   //     an open bill there that this phone has never seen. The redirection is
   //     over: whoever is holding this phone is at the scanned table, not at the
@@ -131,9 +151,23 @@ export function resolveSeating({ orders, currentTable, scanTable, seen, follow }
   if (here.length) return { table, follow: nextFollow, moved: false };
 
   // 4. Nothing here: if one of our own bills turned up under another table
-  //    number, that is where we have been re-seated.
+  //    number, that is where we have been re-seated — but only when the bill
+  //    itself says it was moved out of where we are. "I know this bill and it is
+  //    somewhere else" is NOT enough: a phone that still remembers an open bill
+  //    at โต๊ะ 1 would then be dragged to โต๊ะ 1 by every other table it opened,
+  //    since an empty table always falls through to this step.
+  //
+  //    The bill carries the proof either way:
+  //      absorbedIds — รวมบิล folded our bill into this one;
+  //      movedFrom   — ย้ายโต๊ะ stamps the number it was moved off
+  //                    (StaffView.moveBillTo), so a 1→7→9 chain still matches.
   const isMine = (o) => seen.has(o.id) || (o.absorbedIds || []).some(id => seen.has(id));
-  const found = open.find(o => isMine(o) && String(o.table) !== String(table));
+  const movedOffUs = (o) => {
+    if ((o.absorbedIds || []).some(id => seen.has(id))) return true;
+    const from = (o.movedFrom || []).map(String);
+    return from.includes(String(table)) || (scanTable != null && from.includes(String(scanTable)));
+  };
+  const found = open.find(o => isMine(o) && String(o.table) !== String(table) && movedOffUs(o));
   const to = Number.parseInt(found?.table, 10);
   if (!Number.isInteger(to)) return { table, follow: nextFollow, moved: false };
 

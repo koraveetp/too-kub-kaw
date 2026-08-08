@@ -111,10 +111,13 @@ export const SEED = {
   // login lands on ('owner' → back office, 'staff' → shift board); `shop`
   // decides which shift (day/night) a staff account defaults to.
   staff: [
-    { user: 'admin', pass: '1234', name: 'เจ้าของร้าน', role: 'owner', shop: 'day', position: 'เจ้าของ', dailyWage: 0 },
-    { user: 'day', pass: '1234', name: 'พนักงานกลางวัน', role: 'staff', shop: 'day', position: 'หน้าร้าน', dailyWage: 350 },
-    { user: 'night', pass: '1234', name: 'พนักงานกลางคืน', role: 'staff', shop: 'night', position: 'บาร์', dailyWage: 400 },
-    { user: 'cook', pass: '1234', name: 'แม่ครัว', role: 'staff', shop: 'day', position: 'ครัว', dailyWage: 450 }
+    // `pin` is the 4-digit ไอดีพนักงาน that signs a printed bill or a discount.
+    // Hashed on first run like the password (see migrateStaffPasswords) — these
+    // starter codes are meant to be replaced from the owner's staff screen.
+    { user: 'admin', pass: '1234', pin: '1111', name: 'เจ้าของร้าน', role: 'owner', shop: 'day', position: 'เจ้าของ', dailyWage: 0 },
+    { user: 'day', pass: '1234', pin: '2222', name: 'พนักงานกลางวัน', role: 'staff', shop: 'day', position: 'หน้าร้าน', dailyWage: 350 },
+    { user: 'night', pass: '1234', pin: '3333', name: 'พนักงานกลางคืน', role: 'staff', shop: 'night', position: 'บาร์', dailyWage: 400 },
+    { user: 'cook', pass: '1234', pin: '4444', name: 'แม่ครัว', role: 'staff', shop: 'day', position: 'ครัว', dailyWage: 450 }
   ],
   settings: {
     name: 'ตู้กับข้าวบ้านยาย',

@@ -59,6 +59,19 @@ export function workdayKey(at = new Date()) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+// A key that changes whenever EITHER the working day rolls over OR the shift
+// flips day↔night — e.g. '2026-08-08-day', then '2026-08-08-night' at 18:00,
+// then '2026-08-09-day' at 06:00. The whole night side (18:00 → 05:59) shares
+// one key because workdayKey already folds after-midnight back onto the same
+// date. The เช็กบิล lock is scoped to this: a phone that paid on the day side
+// unlocks itself once the shop turns to the night side (or the next working day
+// begins), so a lunch group returning for dinner scans the same table back in —
+// while the group that just paid stays locked for the rest of the current shift.
+export function shiftKey(at = new Date()) {
+  const d = new Date(at);
+  return `${workdayKey(d)}-${shiftFromDate(d)}`;
+}
+
 // Read an order's shift, tolerating legacy orders saved before `type` existed:
 // fall back to the shift implied by their createdAt timestamp, and finally to
 // 'day' if even that is missing.

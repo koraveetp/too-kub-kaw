@@ -57,6 +57,10 @@ function OwnerView({
   const [newStaffName, setNewStaffName] = useState('');
   const [newStaffUser, setNewStaffUser] = useState('');
   const [newStaffPass, setNewStaffPass] = useState('');
+  // ไอดีพนักงาน — the 4-digit code this person types to sign a printed bill or a
+  // discount. Set by the owner here; the server stores only its hash and never
+  // sends it back, so it is write-only from this screen onwards.
+  const [newStaffPin, setNewStaffPin] = useState('');
   // ตำแหน่ง + ค่าแรงรายวัน + ร้านที่ประจำ ('day' | 'night') — owner-only info,
   // shown nowhere outside this settings panel.
   const [newStaffPosition, setNewStaffPosition] = useState('');
@@ -84,16 +88,25 @@ function OwnerView({
   const [staffEdit, setStaffEdit] = useState(null);
   const [savingStaff, setSavingStaff] = useState(false);
 
-  // Settings form draft. The settings fields are edited against this LOCAL copy
-  // and only committed to the shared state (which POSTs + broadcasts over SSE)
-  // when the form is saved. Binding the inputs straight to `settings`/`setSettings`
-  // fired a network write on every keystroke; the SSE echo of an earlier write
-  // would then land after later keystrokes and rewrite the field mid-typing —
-  // invisible on localhost (~0ms) but a visible character flicker once deployed.
-  // Re-seeded from `settings` only when it changes from OUTSIDE (another tab /
-  // device), which no longer happens while typing here.
+  // Settings form draft. The fields edit this LOCAL copy and only commit to the
+  // shared state (which POSTs + broadcasts over SSE) when the form is saved.
+  //
+  // The draft is re-seeded ONLY when the owner opens the ตั้งค่า tab — never on
+  // every `settings` change. That distinction is the whole fix: the backend
+  // rebroadcasts the FULL state (orders, stock, settings, everything) to every
+  // client on ANY change, and `applyState` builds a brand-new `settings` object
+  // each time even when its values are identical. A busy shop fires those
+  // broadcasts constantly, so re-seeding on `[settings]` would wipe the field
+  // mid-typing on every order — silent on an idle localhost, a live character
+  // flicker on a deployed, in-use shop.
   const [settingsDraft, setSettingsDraft] = useState(settings);
-  useEffect(() => { setSettingsDraft(settings); }, [settings]);
+  useEffect(() => {
+    // Only [subTab] on purpose: a broadcast that arrives while the owner is
+    // typing on this tab must NOT overwrite the draft. Re-entering the tab picks
+    // up the latest committed values.
+    if (subTab === 'settings') setSettingsDraft(settings);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subTab]);
 
   // --- ตารางที่ 3: ประวัติอัปเดตสต็อก ------------------------------------------
   // The stock_history audit trail (who moved what, when). It lives in PostgreSQL
@@ -259,6 +272,10 @@ function OwnerView({
       user: s.user,
       name: s.name || '',
       pass: '',
+      // Same rule as the password box: blank = keep the stored code. The server
+      // only ever tells us whether one exists (`hasPin`), never what it is.
+      pin: '',
+      hasPin: !!s.hasPin,
       // An owner account has no wage to set — see tcMonthlySummary.
       isOwner: s.role === 'owner',
       dailyWage: s.dailyWage ? String(s.dailyWage) : '',
@@ -282,6 +299,9 @@ function OwnerView({
     if (user !== staffEdit.original && (staff || []).some((s) => s.user === user)) {
       return showToast('มีชื่อผู้ใช้งานนี้ในระบบแล้ว');
     }
+    if (staffEdit.pin && !/^\d{4}$/.test(staffEdit.pin)) {
+      return showToast('ไอดีพนักงานต้องเป็นตัวเลข 4 หลัก');
+    }
 
     setSavingStaff(true);
     try {
@@ -291,6 +311,7 @@ function OwnerView({
         // Only sent when the owner typed one — an empty string would be read as
         // a request to blank the password.
         ...(staffEdit.pass ? { pass: staffEdit.pass } : {}),
+        ...(staffEdit.pin ? { pin: staffEdit.pin } : {}),
         // An owner is never on the payroll, so their wage stays pinned at 0
         // rather than carrying whatever an older record happened to hold.
         dailyWage: staffEdit.isOwner ? 0 : staffEdit.dailyWage,
@@ -300,7 +321,8 @@ function OwnerView({
       // new state to every open tab over SSE.
       showToast(
         `แก้ไขข้อมูล ${name || user} เรียบร้อย` +
-        (staffEdit.pass ? ' (เปลี่ยนรหัสผ่านแล้ว)' : '')
+        (staffEdit.pass ? ' (เปลี่ยนรหัสผ่านแล้ว)' : '') +
+        (staffEdit.pin ? ' (ตั้งไอดีใหม่แล้ว)' : '')
       );
       setStaffEdit(null);
     } catch (err) {
@@ -388,10 +410,18 @@ function OwnerView({
       alert('มีชื่อผู้ใช้งานนี้ในระบบแล้ว');
       return;
     }
+    // The PIN is what puts this person's name on a bill they print, so it is
+    // required at creation rather than left to be filled in later. The server
+    // checks the format and rejects a code somebody else already holds.
+    if (!/^\d{4}$/.test(newStaffPin.trim())) {
+      alert('กรุณากรอกไอดีพนักงานเป็นตัวเลข 4 หลัก (เช่น 2580)');
+      return;
+    }
 
     const newAcc = {
       user: newStaffUser.trim(),
       pass: newStaffPass,
+      pin: newStaffPin.trim(),
       name: newStaffName.trim() || newStaffUser.trim(),
       position: newStaffPosition.trim(),
       // Daily wage in THB — numeric so payroll sums can be computed later.
@@ -406,6 +436,7 @@ function OwnerView({
     setNewStaffName('');
     setNewStaffUser('');
     setNewStaffPass('');
+    setNewStaffPin('');
     setNewStaffPosition('');
     setNewStaffWage('');
     setNewStaffShop('day');
@@ -867,6 +898,13 @@ function OwnerView({
                       </span>
                       <span className="text-neutral-400 font-mono text-[10px]">
                         ชื่อผู้ใช้: {s.user} &bull; รหัสผ่าน: ••••••
+                        &bull; ไอดี:{' '}
+                        {/* The code itself is never sent back — only whether one
+                            exists. An account without it cannot sign a bill, so
+                            that gap is called out rather than left blank. */}
+                        {s.hasPin
+                          ? '••••'
+                          : <span className="text-red-500 font-bold font-thai">ยังไม่ได้ตั้ง</span>}
                         {s.dailyWage > 0 && <> &bull; ค่าแรง {s.dailyWage.toLocaleString()} บาท/วัน</>}
                       </span>
                     </div>
@@ -945,22 +983,40 @@ function OwnerView({
                   required
                 />
 
-                <div className="flex gap-2">
+                <div className="grid grid-cols-2 gap-2">
                   <input
                     type="text"
                     value={newStaffPass}
                     onChange={e => setNewStaffPass(e.target.value)}
                     placeholder="รหัสผ่านเข้างาน"
-                    className="flex-1 border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono"
+                    className="border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono"
                     required
                   />
-                  <button
-                    type="submit"
-                    className="bg-ctl hover:bg-ctl-hover text-ctl-ink font-bold px-4 rounded-xl transition font-thai"
-                  >
-                    + เพิ่มพนักงาน
-                  </button>
+                  {/* ไอดีพนักงาน (PIN 4 หลัก) — typed at the till to sign a bill or
+                      a discount, so it must be unique per person. Digits only:
+                      the numeric keypad is what staff will actually be using. */}
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="\d{4}"
+                    maxLength={4}
+                    value={newStaffPin}
+                    onChange={e => setNewStaffPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                    placeholder="ไอดีพนักงาน (4 หลัก)"
+                    className="border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono tracking-[0.3em]"
+                    required
+                  />
                 </div>
+                <p className="text-[10px] text-neutral-400 leading-snug">
+                  ไอดีพนักงานคือเลข 4 หลักที่พนักงานคนนี้ต้องกดทุกครั้งที่พิมพ์บิลหรือให้ส่วนลด
+                  เพื่อบันทึกว่าใครเป็นคนทำ — ห้ามซ้ำกับคนอื่น
+                </p>
+                <button
+                  type="submit"
+                  className="w-full bg-ctl hover:bg-ctl-hover text-ctl-ink font-bold py-2.5 rounded-xl transition font-thai"
+                >
+                  + เพิ่มพนักงาน
+                </button>
               </form>
             </div>
 
@@ -1156,6 +1212,27 @@ function OwnerView({
                   screen, can read the current one back. Only replacing it is
                   possible, and saying so beats an empty box that looks broken. */}
               <p className="text-[10px] text-neutral-400">ระบบเก็บรหัสผ่านแบบเข้ารหัส จึงดูรหัสเดิมไม่ได้ ตั้งใหม่ได้อย่างเดียว</p>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">
+                ไอดีพนักงานใหม่ (4 หลัก)
+              </label>
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={4}
+                value={staffEdit.pin}
+                onChange={(e) => setStaffEdit({ ...staffEdit, pin: e.target.value.replace(/\D/g, '').slice(0, 4) })}
+                placeholder={staffEdit.hasPin ? 'เว้นว่างไว้ = ใช้ไอดีเดิม' : 'ยังไม่ได้ตั้งไอดี — ตั้งเลย'}
+                className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono text-xs tracking-[0.3em]"
+              />
+              <p className="text-[10px] text-neutral-400">
+                ใช้กดยืนยันตอนพิมพ์บิลและให้ส่วนลด · เก็บแบบเข้ารหัสเช่นกัน จึงดูของเดิมไม่ได้
+                {!staffEdit.hasPin && (
+                  <span className="text-red-500 font-bold"> · บัญชีนี้ยังพิมพ์บิลไม่ได้จนกว่าจะตั้งไอดี</span>
+                )}
+              </p>
             </div>
 
             {/* No wage box for an owner account — เจ้าของร้าน is the one paying. */}
